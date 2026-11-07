@@ -25,20 +25,38 @@ function findText(data) {
 
 /** 把文本写进酒馆输入框（带 input 事件，保证酒馆自己的监听生效） */
 export function fillInput(text) {
-    const box = document.querySelector('#send_textarea');
-    if (!box) return false;
-    box.value = String(text);
-    box.dispatchEvent(new Event('input', { bubbles: true }));
-    try { box.focus(); } catch { /* 忽略 */ }
-    return true;
+    const candidates = [
+        '#send_textarea',
+        'textarea#send_textarea',
+        '#chat textarea',
+        'textarea',
+        '[contenteditable="true"]',
+    ];
+    for (const selector of candidates) {
+        const box = document.querySelector(selector);
+        if (!box) continue;
+        try {
+            if (box.tagName === 'TEXTAREA' || box.tagName === 'INPUT') {
+                box.value = String(text);
+            } else {
+                box.textContent = String(text);
+            }
+            box.dispatchEvent(new Event('input', { bubbles: true }));
+            try { box.focus(); } catch { /* 忽略 */ }
+            return { ok: true, selector };
+        } catch { /* 试下一个 */ }
+    }
+    return { ok: false, selector: null };
 }
 
-/** 触发酒馆的发送按钮 */
+/** 触发酒馆的发送按钮（选择器按宿主差异兜底） */
 export function sendMessage() {
-    const btn = document.querySelector('#send_but');
-    if (!btn) return false;
-    btn.click();
-    return true;
+    const candidates = ['#send_but', '#send_button', 'button#send_but', '#rightSendForm button'];
+    for (const selector of candidates) {
+        const btn = document.querySelector(selector);
+        if (btn && typeof btn.click === 'function') { btn.click(); return { ok: true, selector }; }
+    }
+    return { ok: false, selector: null };
 }
 
 /**
@@ -61,15 +79,15 @@ export function installCardBridge(options = {}) {
         const text = findText(data);
         if (!text) return;
 
-        const ok = fillInput(text);
+        const filled = fillInput(text);
         const wantSend = /send|submit/i.test(type);
-        const sent = wantSend ? sendMessage() : false;
+        const sent = (filled.ok && wantSend) ? sendMessage().ok : false;
 
         if (verbose) {
-            console.info('[rphub:bridge] 拦截到卡内消息并写入输入框', { type, length: text.length, ok, sent, data });
+            console.info('[rphub:bridge] 拦截到卡内消息并写入输入框', { type, length: text.length, ...filled, sent, data });
         }
         try {
-            window.dispatchEvent(new CustomEvent('rphub:card-bridge', { detail: { type, text, ok, sent } }));
+            window.dispatchEvent(new CustomEvent('rphub:card-bridge', { detail: { type, text, ok: filled.ok, selector: filled.selector, sent } }));
         } catch { /* 忽略 */ }
     };
 

@@ -13,11 +13,15 @@ const PANEL_ID = 'rphub-diagnostics-panel';
 const BTN_ID = 'rphub-diagnostics-btn';
 const DISABLE_KEY = 'rphub:no-diagnostics';
 
+// 页面 realm 内直接用桥的写入函数做「测试写入」
+import { fillInput, sendMessage } from './card-bridge.js';
+
 let forwardedFailure = null;
 let lastState = null;      // 来自 iframe 的 regex-state
 let lastCards = null;      // GET /cards 结果
 let modeInfo = null;       // { text, notInLibrary }
 let autoState = null;      // { config, last } 来自 iframe 的 auto-get
+let frameInfo = null;      // 页面里的 iframe 概况（卡内前端就在这些 iframe 里）
 /** iframe 消息环形记录（安卓端没有控制台，全部进面板） */
 const cardMessages = [];
 const CARD_MESSAGE_LIMIT = 40;
@@ -43,6 +47,40 @@ function esc(value) {
 
 function backend() {
     try { return window.__rphubLocalBackend__ ?? null; } catch { return null; }
+}
+
+/** 页面里的 iframe 统计：能不能读到 document 决定我们能否注入诊断 */
+function scanFrames() {
+    try {
+        const frames = Array.from(window.frames || []);
+        let sameOrigin = 0;
+        for (const frame of frames) {
+            try { if (frame.document) sameOrigin++; } catch { /* 跨源 */ }
+        }
+        return { total: frames.length, sameOrigin };
+    } catch {
+        return null;
+    }
+}
+
+/** 拉宿主日志并写进面板（安卓没有控制台，这一步是唯一信息源） */
+async function renderHostLogs(box) {
+    if (!box) return;
+    box.textContent = '读取宿主日志…';
+    try {
+        const dev = await (window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__).then(() => window.__TAURITAVERN__?.api?.dev);
+        if (!dev?.frontendLogs?.list) { box.textContent = '当前宿主没有 frontendLogs API（非 TT 或无调试 API）'; return; }
+        const entries = await dev.frontendLogs.list({ limit: 300 });
+        const picked = (entries || [])
+            .filter((e) => String(e.message || '').includes('rphub')
+                || e.level === 'error' || e.level === 'warn')
+            .slice(-60);
+        box.innerHTML = picked.length
+            ? picked.map((e) => `<div style="white-space:pre-wrap;margin-bottom:2px">[${esc(e.level)}] ${esc(e.message)}</div>`).join('')
+            : '宿主日志里没有 warn/error 或 rphub 条目';
+    } catch (e) {
+        box.textContent = `读取失败：${e?.message || e}`;
+    }
 }
 
 /** 「上次自动处理」的人话摘要 */
@@ -313,6 +351,7 @@ function renderPanel(panel, extra) {
       <div style="font-size:11px;line-height:1.6;margin-bottom:6px;word-break:break-all">
         后端：<b>${esc(report.backend?.mode ?? '未安装')}</b>${report.backend?.base ? `<br><span style="opacity:.7">${esc(report.backend.base)}</span>` : ''}<br>
         宿主：ST=${report.host.hasSillyTavern ? '✓' : '✗'} · 酒馆助手=${report.host.hasTavernHelper ? '✓' : '✗'} · TT调试API=${report.host.hasTauriTavernDev ? '✓' : '✗'}
+        ${frameInfo ? `<br>页面 iframe：${frameInfo.total} 个（同源可读 ${frameInfo.sameOrigin} 个）` : ''}
       </div>
 
       <div style="font-size:11px;background:#f7f4ff;border:1px solid #d9d2f0;border-radius:6px;padding:6px;margin-bottom:6px">
@@ -346,6 +385,7 @@ function renderPanel(panel, extra) {
         <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
           <button data-act="card-scripts" style="font-size:11px;padding:1px 8px">抓卡内脚本</button>
           <button data-act="trace-msg" style="font-size:11px;padding:1px 8px">追踪 iframe 消息</button>
+          <button data-act="test-input" style="font-size:11px;padding:1px 8px">测试写入</button>
         </div>
         <div data-role="scripts" style="margin-top:4px;max-height:190px;overflow:auto"></div>
       </div>
@@ -387,24 +427,8 @@ function renderPanel(panel, extra) {
         toast(ok ? '诊断报告已复制' : '复制失败：请手动抄写');
     });
 
-    panel.querySelector('[data-act="logs"]').addEventListener('click', async () => {
-        const box = panel.querySelector('[data-role="logs"]');
-        box.textContent = '读取宿主日志…';
-        try {
-            const dev = await (window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__).then(() => window.__TAURITAVERN__?.api?.dev);
-            if (!dev?.frontendLogs?.list) { box.textContent = '当前宿主没有 frontendLogs API'; return; }
-            const entries = await dev.frontendLogs.list({ limit: 300 });
-            // 既看 rphub 自己的行，也看所有 warn/error（卡内 iframe 的报错会在这里冒出来）
-            const picked = (entries || [])
-                .filter((e) => String(e.message || '').includes('rphub')
-                    || e.level === 'error' || e.level === 'warn')
-                .slice(-60);
-            box.innerHTML = picked.length
-                ? picked.map((e) => `<div style="white-space:pre-wrap;margin-bottom:2px">[${esc(e.level)}] ${esc(e.message)}</div>`).join('')
-                : '宿主日志里没有 warn/error 或 rphub 条目';
-        } catch (e) {
-            box.textContent = `读取失败：${e?.message || e}`;
-        }
+    panel.querySelector('[data-act="logs"]').addEventListener('click', () => {
+        void renderHostLogs(panel.querySelector('[data-role="logs"]'));
     });
 
     panel.querySelector('[data-act="allow"]').addEventListener('click', async () => {
@@ -556,6 +580,23 @@ function renderPanel(panel, extra) {
         });
     }
 
+    // 测试写入：验证「我们的写入路径」在宿主里能不能落到输入框（与卡无关）
+    const testBtn = panel.querySelector('[data-act="test-input"]');
+    if (testBtn) {
+        testBtn.addEventListener('click', () => {
+            const probe = `RP-Hub 测试写入 ${new Date().toLocaleTimeString()}`;
+            const result = fillInput(probe);
+            pushCardMessage({
+                kind: result.ok ? 'bridge-test' : 'bridge-test-fail',
+                type: result.selector ? `selector=${result.selector}` : 'no-input-found',
+                keys: [],
+                preview: probe,
+                ok: result.ok,
+            });
+            toast(result.ok ? `已写入输入框（${result.selector}）` : '没找到可写入的输入框');
+        });
+    }
+
     // 抓卡内脚本：看清按钮到底调用了什么（postMessage / triggerSlash / parent.document / TavernHelper）
     const scriptsBtn = panel.querySelector('[data-act="card-scripts"]');
     if (scriptsBtn) {
@@ -695,8 +736,16 @@ async function refresh(panel, extra, { force = false } = {}) {
     if (cardsRes) lastCards = cardsRes;
     if (autoRes?.result) autoState = autoRes.result;
 
+    frameInfo = scanFrames();
     modeInfo = await lookupMode(be);
     renderPanel(panel, extra);
+
+    // 安卓没有控制台：打开面板就自动拉一次宿主日志（用户不用再点按钮）
+    const logsBox = panel.querySelector('[data-role="logs"]');
+    if (logsBox && !logsBox.dataset.loaded) {
+        logsBox.dataset.loaded = '1';
+        void renderHostLogs(logsBox);
+    }
 }
 
 /**
