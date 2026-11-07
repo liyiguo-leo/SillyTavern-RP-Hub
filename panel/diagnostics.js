@@ -1,39 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// panel/diagnostics.js —— 不需要控制台的诊断浮层
+// panel/diagnostics.js —— 不需要控制台的诊断浮层（v2：移动端布局 + iframe RPC）
 //
-// 背景：TauriTavern 这类封装默认可能没有 F12 / DevTools，用户在“卡上传失败 422”时
-// 无法把控制台里那行 `[rphub-local] POST /cards/analyze 未完成：…` 拷出来。
-// 这个浮层把同样信息做成可点、可复制的界面，并且能回答一个关键问题：
-//   **请求到底有没有到达本地后端？**（最近请求列表为空 = 根本没到，问题在别处）
-//
-// 依赖：无（纯 DOM + 内联样式），不引入 jquery / toastr 也可工作。
+// 设计要点：
+//   1. 布局自适应：宽度 min(460, 视口-16)，底边抬高避开输入框与宿主悬浮球；
+//      长 URL / 长报错一律断行，不再横向溢出。
+//   2. 当前卡与「卡内正则是否放行」由酒馆助手 iframe 通过 RPC 提供
+//      （页面 realm 的 getContext() 在 TauriTavern 里可能是裁剪版）。
+//   3. by-name 的 404 是正常探测，不计入失败（已由 fetch-shim 过滤）。
+//   4. 卡库列表走 GET /cards，用来回答「卡到底有没有进本地库」。
 
 const PANEL_ID = 'rphub-diagnostics-panel';
 const BTN_ID = 'rphub-diagnostics-btn';
 
-/**
- * 来自酒馆助手 iframe 的失败上报。
- * 导入拦截跑在 TH 的 script iframe 里（独立 realm），那儿的失败本 realm 看不到，
- * 所以 enabler 会用 postMessage 把失败转发到页面，由本面板统一展示。
- */
 let forwardedFailure = null;
+let lastState = null;      // 来自 iframe 的 regex-state
+let lastCards = null;      // GET /cards 结果
+let modeInfo = null;       // { text, notInLibrary }
 
-// 注意：监听器在模块加载时就注册（早于面板挂载），避免错过首个失败
-try {
-    window.addEventListener('message', (event) => {
-        const data = event?.data;
-        if (!data || typeof data !== 'object' || data.type !== 'rphub:failure') return;
-        forwardedFailure = { ...data.payload, from: 'tavern-helper-iframe', at: new Date().toISOString() };
-        try {
-            if (typeof window.toastr !== 'undefined' && forwardedFailure?.status >= 400) {
-                const code = forwardedFailure?.body?.error?.code || '';
-                window.toastr.error(`卡处理失败：${forwardedFailure.status} ${code}`, 'RP-Hub', { timeOut: 10000 });
-            }
-        } catch { /* 忽略 */ }
-        const panel = document.getElementById(PANEL_ID);
-        if (panel && typeof window.__rphubRenderDiagnostics === 'function') window.__rphubRenderDiagnostics();
-    });
-} catch { /* 忽略 */ }
+const pendingRpc = new Map();
+
+/* ------------------------------ 工具 ------------------------------ */
 
 function esc(value) {
     return String(value ?? '').replace(/[&<>"']/g, (c) => ({
@@ -45,94 +31,82 @@ function backend() {
     try { return window.__rphubLocalBackend__ ?? null; } catch { return null; }
 }
 
-/* ---------------- 正则白名单（scoped 脚本的准入门槛） ----------------
- * 引擎读脚本时 allowedOnly=true：卡内 scoped 正则必须出现在
- * extension_settings.character_allowed_regex（avatar 数组）里才会被执行。
- * 酒馆内置「正则」扩展会替用户写这份白名单，但**它一旦启用就会和本引擎双重替换**；
- * 所以正确姿势是关掉内置正则，再由这里显式放行当前卡（或撤销）。
- */
-function stContext() {
-    const pick = (w) => {
-        try { return w?.SillyTavern?.getContext?.() ?? null; } catch { return null; }
-    };
-    return pick(globalThis) || (typeof window !== 'undefined' ? pick(window.parent) : null) || null;
-}
-
-function currentAvatar() {
-    const c = stContext();
-    return c?.characters?.[c.this_chid]?.avatar || null;
-}
-
-function isScopedAllowed() {
-    const c = stContext();
-    const avatar = currentAvatar();
-    if (!c || !avatar) return null; // 未知（没选卡 / 无上下文）
-    const list = c.extensionSettings?.character_allowed_regex;
-    return Array.isArray(list) && list.includes(avatar);
-}
-
-function setScopedAllowed(allow) {
-    const c = stContext();
-    const avatar = currentAvatar();
-    if (!c || !avatar) return false;
-    c.extensionSettings = c.extensionSettings || {};
-    if (!Array.isArray(c.extensionSettings.character_allowed_regex)) {
-        c.extensionSettings.character_allowed_regex = [];
-    }
-    const list = c.extensionSettings.character_allowed_regex;
-    const idx = list.indexOf(avatar);
-    if (allow && idx < 0) list.push(avatar);
-    if (!allow && idx >= 0) list.splice(idx, 1);
-    try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
-    return true;
-}
-
-/** 查当前卡在本地库里的语义模式（rphub / st / 不在库） */
-async function lookupMode(extra) {
-    const be = backend();
-    if (!be) return '后端未安装';
-    const c = stContext();
-    const name = c?.characters?.[c.this_chid]?.name;
-    if (!name) return '未选中角色';
+function toast(message) {
     try {
-        const res = await fetch(`${be.base}/cards/by-name/${encodeURIComponent(name)}`);
-        if (res.status === 404) {
-            const probe = await fetch(`${be.base}/status`);
-            return probe.ok ? '卡不在本地库' : '后端不可达';
-        }
-        if (!res.ok) return '后端不可达';
-        const data = await res.json();
-        return `${data.formatDetail}${data.marked ? '（手动标记）' : ''}`;
-    } catch {
-        return '后端不可达';
-    }
+        if (typeof window.toastr !== 'undefined') { window.toastr.info(message, 'RP-Hub'); return; }
+    } catch { /* 忽略 */ }
+    console.info('[rphub]', message);
 }
 
-/** 汇总诊断数据（同时供复制与 report() 使用） */
+/** 向所有子 frame 广播（酒馆助手 iframe 在里面） */
+function broadcast(message) {
+    try {
+        const frames = window.frames || [];
+        for (let i = 0; i < frames.length; i++) {
+            try { frames[i].postMessage(message, '*'); } catch { /* 单个失败忽略 */ }
+        }
+    } catch { /* 忽略 */ }
+}
+
+/** 调 iframe 的 RPC；超时返回 null（表示没有 iframe 接） */
+function rpc(method, params = {}, timeoutMs = 1500) {
+    return new Promise((resolve) => {
+        const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        pendingRpc.set(id, resolve);
+        broadcast({ type: 'rphub:rpc', id, method, params });
+        setTimeout(() => {
+            if (pendingRpc.delete(id)) resolve(null);
+        }, timeoutMs);
+    });
+}
+
+try {
+    window.addEventListener('message', (event) => {
+        const data = event?.data;
+        if (!data || typeof data !== 'object') return;
+
+        if (data.type === 'rphub:rpc:result') {
+            const done = pendingRpc.get(data.id);
+            if (done) { pendingRpc.delete(data.id); done({ result: data.result ?? null, error: data.error ?? null }); }
+            return;
+        }
+
+        if (data.type === 'rphub:failure') {
+            forwardedFailure = { ...data.payload, from: 'tavern-helper-iframe', at: new Date().toISOString() };
+            try {
+                if (typeof window.toastr !== 'undefined' && forwardedFailure?.status >= 400) {
+                    const code = forwardedFailure?.body?.error?.code || '';
+                    window.toastr.error(`卡处理失败：${forwardedFailure.status} ${code}`, 'RP-Hub', { timeOut: 10000 });
+                }
+            } catch { /* 忽略 */ }
+            if (typeof window.__rphubRenderDiagnostics === 'function') window.__rphubRenderDiagnostics();
+        }
+    });
+} catch { /* 忽略 */ }
+
+/** 汇总诊断（复制/报告用） */
 export function collectReport(extra = {}) {
     const be = backend();
     const recent = typeof be?.recent === 'function' ? be.recent() : [];
-    const failure = typeof be?.lastFailure === 'function' ? be.lastFailure() : null;
+    const failure = (typeof be?.lastFailure === 'function' ? be.lastFailure() : null) || forwardedFailure;
     return {
         at: new Date().toISOString(),
         extension: extra.version ? { version: extra.version } : undefined,
         backend: be ? { mode: be.mode, base: be.base, version: be.version } : null,
         host: {
             href: (() => { try { return location.href; } catch { return null; } })(),
+            viewport: (() => { try { return { w: window.innerWidth, h: window.innerHeight }; } catch { return null; } })(),
             hasSillyTavern: (() => { try { return typeof SillyTavern !== 'undefined'; } catch { return false; } })(),
             hasTavernHelper: (() => { try { return !!window.TavernHelper; } catch { return false; } })(),
             hasTauriTavernDev: (() => { try { return !!window.__TAURITAVERN__?.api?.dev; } catch { return false; } })(),
         },
-        lastFailure: failure || forwardedFailure,
-        lastFailureSource: failure ? 'page' : (forwardedFailure ? 'tavern-helper-iframe' : null),
+        currentCharacter: lastState,
+        library: lastCards ? { count: lastCards.count, names: (lastCards.cards || []).slice(0, 10).map((c) => c.characterName) } : null,
+        lastFailure: failure,
         recentRequests: recent,
-        note: recent.length === 0
-            ? '本地后端没有收到任何接口请求：说明这次失败发生在别处（例如酒馆原生导入），不是 RP-Hub 后端拒绝的。'
-            : '本地后端收到过请求，可对照 lastFailure / 最近请求判断是哪一步被拒绝。',
     };
 }
 
-/** 生成可复制的纯文本报告 */
 export function reportText(extra = {}) {
     return JSON.stringify(collectReport(extra), null, 2);
 }
@@ -156,92 +130,106 @@ async function copyText(text) {
     }
 }
 
-function toast(message) {
-    try {
-        if (typeof window.toastr !== 'undefined') { window.toastr.info(message, 'RP-Hub'); return; }
-    } catch { /* 忽略 */ }
-    console.info('[rphub]', message);
+/* ------------------------------ 渲染 ------------------------------ */
+
+function layout(panel, btn) {
+    const vw = Math.max(320, window.innerWidth || 360);
+    const vh = Math.max(420, window.innerHeight || 640);
+    const width = Math.min(460, vw - 16);
+
+    Object.assign(btn.style, {
+        right: '8px',
+        bottom: '76px',          // 抬高，避开输入框与宿主悬浮球
+    });
+    Object.assign(panel.style, {
+        width: `${width}px`,
+        right: '8px',
+        left: 'auto',
+        bottom: '116px',
+        maxHeight: `${Math.round(vh * 0.62)}px`,
+    });
 }
 
 function renderPanel(panel, extra) {
     const report = collectReport(extra);
     const f = report.lastFailure;
-    const rows = report.recentRequests.map((r) => (
-        `<tr><td>${new Date(r.at).toLocaleTimeString()}</td><td>${esc(r.method)} ${esc(r.path)}</td>`
-        + `<td style="color:${r.status >= 400 ? '#d33' : '#2a2'}">${r.status}</td><td>${r.byteLength}B</td></tr>`
+    const state = lastState;
+    const cards = lastCards;
+
+    const recentRows = report.recentRequests.map((r) => (
+        `<tr><td style="white-space:nowrap">${new Date(r.at).toLocaleTimeString()}</td>`
+        + `<td style="word-break:break-all">${esc(r.method)} ${esc(r.path)}</td>`
+        + `<td style="color:${r.status >= 400 ? '#c22' : '#1f8a4c'};white-space:nowrap">${r.status}</td>`
+        + `<td style="white-space:nowrap">${r.byteLength}B</td></tr>`
     )).join('');
 
+    const allowedText = state?.allowed === null || state?.allowed === undefined
+        ? (state ? '未知' : '未知（未取到酒馆上下文）')
+        : (state.allowed ? '已允许' : '未允许');
+    const allowedColor = state?.allowed ? '#1f8a4c' : '#c22';
+
     panel.innerHTML = `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:6px">
         <strong style="font-size:13px">RP-Hub 诊断</strong>
-        <span style="font-size:11px;opacity:.7">${esc(extra.version || '')}</span>
+        <span style="font-size:11px;opacity:.65">${esc(extra.version || '')}</span>
         <span style="flex:1"></span>
-        <button data-act="copy" style="font-size:11px;padding:2px 6px;cursor:pointer">复制报告</button>
-        <button data-act="logs" style="font-size:11px;padding:2px 6px;cursor:pointer">拉取宿主日志</button>
-        <button data-act="close" style="font-size:11px;padding:2px 6px;cursor:pointer">关闭</button>
+        <button data-act="copy" style="font-size:11px;padding:2px 6px">复制</button>
+        <button data-act="logs" style="font-size:11px;padding:2px 6px">宿主日志</button>
+        <button data-act="close" style="font-size:11px;padding:2px 6px">收起</button>
       </div>
-      <div style="font-size:11px;line-height:1.5;margin-bottom:6px">
-        后端：<b>${esc(report.backend?.mode ?? '未安装')}</b>
-        ${report.backend?.base ? ` · ${esc(report.backend.base)}` : ''}<br>
-        宿主：ST=${report.host.hasSillyTavern ? '✓' : '✗'} ·
-        酒馆助手=${report.host.hasTavernHelper ? '✓' : '✗'} ·
-        TT调试API=${report.host.hasTauriTavernDev ? '✓' : '✗'}<br>
-        ${esc(report.note)}
+
+      <div style="font-size:11px;line-height:1.6;margin-bottom:6px;word-break:break-all">
+        后端：<b>${esc(report.backend?.mode ?? '未安装')}</b>${report.backend?.base ? `<br><span style="opacity:.7">${esc(report.backend.base)}</span>` : ''}<br>
+        宿主：ST=${report.host.hasSillyTavern ? '✓' : '✗'} · 酒馆助手=${report.host.hasTavernHelper ? '✓' : '✗'} · TT调试API=${report.host.hasTauriTavernDev ? '✓' : '✗'}
       </div>
-      <div style="font-size:11px;background:#f2f6ff;border:1px solid #ccd9f2;border-radius:6px;padding:6px;margin-bottom:6px">
-        <b>正则引擎</b>：<span data-role="mode">查询中…</span><br>
-        本卡内嵌正则（scoped）：<b data-role="allowed">…</b>
-        <button data-act="allow" style="font-size:11px;padding:1px 6px;margin-left:6px;cursor:pointer">允许</button>
-        <button data-act="deny" style="font-size:11px;padding:1px 6px;cursor:pointer">撤销</button>
-        <div style="opacity:.75;margin-top:3px">同一份正则只能由一个引擎执行：请关闭酒馆内置「正则」扩展，再在这里显式放行本卡。</div>
+
+      <div style="font-size:11px;background:#f2f6ff;border:1px solid #ccd9f2;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all">
+        <b>当前卡</b>：${esc(state?.name ?? '未知')}${state?.avatar ? `<br><span style="opacity:.7">${esc(state.avatar)}</span>` : ''}<br>
+        <b>正则引擎模式</b>：<span data-role="mode">${esc(modeInfo?.text ?? '查询中…')}</span><br>
+        <b>卡内正则（scoped）</b>：<b style="color:${allowedColor}">${esc(allowedText)}</b>
+        <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">
+          <button data-act="allow" style="font-size:11px;padding:1px 8px">允许</button>
+          <button data-act="deny" style="font-size:11px;padding:1px 8px">撤销</button>
+          ${modeInfo?.notInLibrary ? '<button data-act="mark-rp" style="font-size:11px;padding:1px 8px">手动标记为 RP</button>' : ''}
+        </div>
+        <div style="opacity:.72;margin-top:4px">只能有一个正则引擎：请关闭酒馆内置「正则」扩展后，再在这里放行本卡。</div>
       </div>
-      ${f ? `<div style="font-size:11px;background:#fff3f3;border:1px solid #f3c9c9;border-radius:6px;padding:6px;margin-bottom:6px">
-        <b>最近失败</b>：${esc(f.method)} ${esc(f.path)} → <b style="color:#d33">${f.status}</b> ${esc(f.code)}<br>
-        ${esc(f.message)}<br>
-        体积 ${f.byteLength}B · 前 16 字节 <code>${esc(f.headHex || '(空)')}</code>
+
+      <div style="font-size:11px;margin-bottom:6px;word-break:break-all">
+        <b>本地卡库</b>：${cards ? `${cards.count} 张` : '读取中…'}
+        ${cards && cards.cards?.length ? `<div style="opacity:.75;margin-top:2px">${cards.cards.slice(0, 4).map((c) => esc(c.characterName || '(无名)')).join(' · ')}${cards.count > 4 ? ' …' : ''}</div>` : ''}
+      </div>
+
+      ${f ? `<div style="font-size:11px;background:#fff3f3;border:1px solid #f3c9c9;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all">
+        <b>最近失败</b>：${esc(f.method)} <span style="opacity:.8">${esc(f.path)}</span> → <b style="color:#c22">${f.status}</b> ${esc(f.body?.error?.code || f.code || '')}<br>
+        ${esc(f.body?.error?.message || f.message || '')}<br>
+        体积 ${f.byteLength ?? 0}B · 前 16 字节 <code>${esc(f.headHex || '(空)')}</code>
         ${f.hint ? `<br>提示：${esc(f.hint)}` : ''}
-      </div>` : '<div style="font-size:11px;margin-bottom:6px">最近失败：无</div>'}
-      <div style="font-size:11px;max-height:150px;overflow:auto">
-        ${rows
+      </div>` : '<div style="font-size:11px;margin-bottom:6px;opacity:.75">最近失败：无</div>'}
+
+      <div style="font-size:11px;max-height:132px;overflow:auto">
+        ${recentRows
             ? `<table style="width:100%;border-collapse:collapse;font-size:11px">
                  <thead><tr><th align="left">时间</th><th align="left">接口</th><th align="left">码</th><th align="left">体积</th></tr></thead>
-                 <tbody>${rows}</tbody></table>`
-            : '<div style="opacity:.7">暂无请求记录</div>'}
+                 <tbody>${recentRows}</tbody></table>`
+            : '<div style="opacity:.7">本页暂无请求记录（请求可能发生在酒馆助手 iframe 里，那属正常）</div>'}
       </div>
-      <div data-role="logs" style="font-size:11px;max-height:150px;overflow:auto;margin-top:6px"></div>
+      <div data-role="logs" style="font-size:11px;max-height:120px;overflow:auto;margin-top:6px;word-break:break-all"></div>
     `;
 
     panel.querySelector('[data-act="close"]').addEventListener('click', () => { panel.style.display = 'none'; });
 
-    // 正则白名单：显示 + 一键放行/撤销（scoped 脚本必须在这里放行才会被执行）
-    const modeEl = panel.querySelector('[data-role="mode"]');
-    const allowedEl = panel.querySelector('[data-role="allowed"]');
-    const syncAllowed = () => {
-        const value = isScopedAllowed();
-        allowedEl.textContent = value === null ? '未知（未选中角色）' : (value ? '已允许' : '未允许');
-        allowedEl.style.color = value ? '#1f8a4c' : '#c22';
-    };
-    syncAllowed();
-    lookupMode(extra).then((text) => { if (modeEl) modeEl.textContent = text; }).catch(() => { /* 忽略 */ });
-
-    panel.querySelector('[data-act="allow"]').addEventListener('click', () => {
-        if (setScopedAllowed(true)) { syncAllowed(); toast('已允许本卡内嵌正则；重新打开聊天或强制重渲染后生效'); }
-        else toast('写入失败：没有拿到酒馆上下文');
-    });
-    panel.querySelector('[data-act="deny"]').addEventListener('click', () => {
-        if (setScopedAllowed(false)) { syncAllowed(); toast('已撤销本卡内嵌正则的允许'); }
-        else toast('写入失败：没有拿到酒馆上下文');
-    });
     panel.querySelector('[data-act="copy"]').addEventListener('click', async () => {
         const ok = await copyText(reportText(extra));
-        toast(ok ? '诊断报告已复制到剪贴板' : '复制失败：请手动从面板抄写');
+        toast(ok ? '诊断报告已复制' : '复制失败：请手动抄写');
     });
+
     panel.querySelector('[data-act="logs"]').addEventListener('click', async () => {
         const box = panel.querySelector('[data-role="logs"]');
-        box.textContent = '正在向宿主读取日志…';
+        box.textContent = '读取宿主日志…';
         try {
             const dev = await (window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__).then(() => window.__TAURITAVERN__?.api?.dev);
-            if (!dev?.frontendLogs?.list) { box.textContent = '当前宿主没有 frontendLogs API（非 TT 或无调试 API）'; return; }
+            if (!dev?.frontendLogs?.list) { box.textContent = '当前宿主没有 frontendLogs API'; return; }
             const entries = await dev.frontendLogs.list({ limit: 200 });
             const picked = (entries || []).filter((e) => String(e.message || '').includes('rphub')).slice(-40);
             box.innerHTML = picked.length
@@ -251,6 +239,91 @@ function renderPanel(panel, extra) {
             box.textContent = `读取失败：${e?.message || e}`;
         }
     });
+
+    panel.querySelector('[data-act="allow"]').addEventListener('click', async () => {
+        const res = await rpc('regex-set', { allow: true });
+        if (!res || res.error || !res.result?.ok) { toast(`放行失败：${res?.error || res?.result?.reason || '酒馆助手未响应'}`); return; }
+        toast('已允许本卡内嵌正则；重新打开聊天后生效');
+        await refresh(panel, extra);
+    });
+
+    panel.querySelector('[data-act="deny"]').addEventListener('click', async () => {
+        const res = await rpc('regex-set', { allow: false });
+        if (!res || res.error || !res.result?.ok) { toast(`撤销失败：${res?.error || res?.result?.reason || '酒馆助手未响应'}`); return; }
+        toast('已撤销本卡内嵌正则的允许');
+        await refresh(panel, extra);
+    });
+
+    // 卡不在本地库时的兜底：按「当前卡头像」的哈希写一条 rphub 标记（与 rp-mode 的探测口径一致）
+    const markBtn = panel.querySelector('[data-act="mark-rp"]');
+    if (markBtn) {
+        markBtn.addEventListener('click', async () => {
+            const be = backend();
+            const avatar = lastState?.avatar;
+            if (!be?.base || !avatar) { toast('缺少卡信息，无法标记'); return; }
+            try {
+                const res = await fetch(`/characters/${encodeURIComponent(avatar)}`);
+                if (!res.ok) throw new Error(`读取卡图失败 HTTP ${res.status}`);
+                const bytes = new Uint8Array(await res.arrayBuffer());
+                const { sha256HexBytes } = await import('../local/sha256.js');
+                const hash = sha256HexBytes(bytes);
+                const put = await fetch(`${be.base}/marks/${hash}`, {
+                    method: 'PUT',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ type: 'rphub' }),
+                });
+                if (!put.ok) throw new Error(`写入标记失败 HTTP ${put.status}`);
+                try { window.__rphub__?.clearModeCache?.(); } catch { /* 忽略 */ }
+                toast('已按当前卡标记为 RP；重新打开聊天后按 RP 语义渲染');
+                await refresh(panel, extra);
+            } catch (e) {
+                toast(`标记失败：${e?.message || e}`);
+            }
+        });
+    }
+}
+
+/** 查当前卡在本地库里的语义模式 */
+async function lookupMode(be) {
+    const name = lastState?.name;
+    if (!be?.base) return { text: '后端未安装' };
+    if (!name) return { text: '未选中角色' };
+    try {
+        const res = await fetch(`${be.base}/cards/by-name/${encodeURIComponent(name)}`);
+        if (res.status === 404) {
+            const probe = await fetch(`${be.base}/status`);
+            const reachable = probe.ok;
+            return {
+                text: reachable ? '卡不在本地库（按 st 语义运行）' : '后端不可达',
+                notInLibrary: reachable,
+            };
+        }
+        if (!res.ok) return { text: `HTTP ${res.status}` };
+        const data = await res.json();
+        return { text: `${data.formatDetail}${data.marked ? '（手动标记）' : ''}` };
+    } catch {
+        return { text: '查询失败' };
+    }
+}
+
+/** 拉取 iframe 状态 + 卡库 + 当前卡模式，然后一次性重绘 */
+async function refresh(panel, extra) {
+    const be = backend();
+    const [stateRes, cardsRes] = await Promise.all([
+        rpc('regex-state'),
+        (async () => {
+            if (!be?.base) return null;
+            try {
+                const res = await fetch(`${be.base}/cards`);
+                return res.ok ? await res.json() : null;
+            } catch { return null; }
+        })(),
+    ]);
+    if (stateRes?.result) lastState = stateRes.result;
+    if (cardsRes) lastCards = cardsRes;
+
+    modeInfo = await lookupMode(be);
+    renderPanel(panel, extra);
 }
 
 /**
@@ -265,43 +338,47 @@ export function mountDiagnostics(extra = {}) {
     btn.id = BTN_ID;
     btn.type = 'button';
     btn.textContent = 'RP-Hub 诊断';
-    btn.title = '打开本地后端诊断（无需控制台）';
+    btn.title = '打开本地后端诊断（不需要控制台）';
     Object.assign(btn.style, {
-        position: 'fixed', right: '10px', bottom: '10px', zIndex: '99998',
+        position: 'fixed', zIndex: '99998',
         padding: '4px 8px', fontSize: '11px', lineHeight: '1.4',
         background: 'rgba(30,30,30,.82)', color: '#eee', border: '1px solid #555',
-        borderRadius: '6px', cursor: 'pointer', opacity: '.75',
+        borderRadius: '6px', cursor: 'pointer', opacity: '.8',
     });
-    btn.addEventListener('mouseenter', () => { btn.style.opacity = '1'; });
-    btn.addEventListener('mouseleave', () => { btn.style.opacity = '.75'; });
 
     const panel = document.createElement('div');
     panel.id = PANEL_ID;
     Object.assign(panel.style, {
-        position: 'fixed', right: '10px', bottom: '42px', zIndex: '99999', width: '420px',
-        maxHeight: '70vh', overflow: 'auto', background: 'rgba(255,255,255,.98)', color: '#222',
+        position: 'fixed', zIndex: '99999', overflow: 'auto',
+        background: 'rgba(255,255,255,.98)', color: '#222',
         border: '1px solid #bbb', borderRadius: '8px', boxShadow: '0 6px 24px rgba(0,0,0,.25)',
         padding: '10px', fontFamily: 'system-ui, sans-serif', display: 'none',
+        boxSizing: 'border-box',
     });
+
+    layout(panel, btn);
+    window.addEventListener('resize', () => layout(panel, btn));
 
     btn.addEventListener('click', () => {
         const open = panel.style.display === 'none' || !panel.style.display;
         panel.style.display = open ? 'block' : 'none';
-        if (open) renderPanel(panel, extra);
+        if (open) {
+            panel.innerHTML = '<div style="font-size:11px">读取中…</div>';
+            void refresh(panel, extra);
+        }
     });
 
     document.body.appendChild(btn);
     document.body.appendChild(panel);
 
     // 供 iframe 转发失败时重绘
-    window.__rphubRenderDiagnostics = () => renderPanel(panel, extra);
+    window.__rphubRenderDiagnostics = () => { if (panel.style.display !== 'none') void refresh(panel, extra); };
 
-    // 后端失败时自动弹面板 + 一条 toast（TT 没控制台也能看到原因）
+    // 页面 realm 自己的失败（例如导入拦截走父页面时）
     const be = backend();
     if (be?.onFailure) {
         be.onFailure((failure) => {
             const code = failure?.body?.error?.code || '';
-            const msg = failure?.body?.error?.message || '';
             try {
                 if (typeof window.toastr !== 'undefined') {
                     window.toastr.error(`卡处理失败：${failure.status} ${code}`, 'RP-Hub', { timeOut: 10000 });
@@ -309,7 +386,6 @@ export function mountDiagnostics(extra = {}) {
             } catch { /* 忽略 */ }
             panel.style.display = 'block';
             renderPanel(panel, extra);
-            console.warn('[rphub] 接口失败：', failure.status, code, msg);
         });
     }
 

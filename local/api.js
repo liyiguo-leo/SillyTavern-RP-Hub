@@ -270,6 +270,27 @@ export async function handleRequest(req) {
             });
         }
 
+        /* ---------- GET /cards ---------- */
+        // 卡库列表（诊断面板/自检用）：只读元数据，不碰卡体
+        if (method === 'GET' && seg.length === 1 && seg[0] === 'cards') {
+            const index = await readIndex();
+            const marksData = await readMarks();
+            const cards = Object.entries(index.cards || {})
+                .map(([cardId, meta]) => ({
+                    cardId,
+                    characterName: meta.characterName ?? null,
+                    format: meta.format ?? null,
+                    formatDetail: meta.formatDetail ?? null,
+                    marked: !!(meta.contentHash && marksData.marks?.[meta.contentHash]),
+                    importedAt: meta.importedAt ?? null,
+                    regexCount: meta.regexCount ?? 0,
+                    lorebookCount: meta.lorebookCount ?? 0,
+                    contentHash: meta.contentHash ?? null,
+                }))
+                .sort((a, b) => String(b.importedAt || '').localeCompare(String(a.importedAt || '')));
+            return json(200, { cards, count: cards.length, backend: 'local' });
+        }
+
         /* ---------- GET /cards/by-name/:name ---------- */
         if (method === 'GET' && seg[0] === 'cards' && seg[1] === 'by-name') {
             const decodedName = decodeName(seg.slice(2).join('/') || '');

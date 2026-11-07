@@ -161,7 +161,10 @@ export async function installLocalBackend(options = {}) {
             try {
                 state.recent.push({ at: Date.now(), method, path, status: result.status, byteLength: body ? body.length : 0 });
                 if (state.recent.length > 20) state.recent.shift();
-                if (result.status >= 400 && typeof state.onFailure === 'function') {
+
+                // by-name / exists 的 404 是「这张卡不在本地库」的正常探测结果，不算故障
+                const expectedMiss = result.status === 404 && /^\/(cards\/by-name|cards\/exists)\//.test(path);
+                if (result.status >= 400 && !expectedMiss && typeof state.onFailure === 'function') {
                     state.onFailure({ method, path, status: result.status, body: result.body, byteLength: body ? body.length : 0 });
                 }
             } catch { /* 诊断失败不影响主流程 */ }

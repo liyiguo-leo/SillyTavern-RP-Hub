@@ -44,6 +44,13 @@ async function main() {
         }
     } catch { /* 忽略 */ }
 
+    // RPC：父页面的诊断面板拿不到「当前卡 / 白名单」，但本 realm 的 getContext() 是完整的
+    try {
+        installRpc();
+    } catch (e) {
+        console.warn('[rphub:panel] RPC 安装失败：', e);
+    }
+
     if (!await panelBundleExists()) {
         console.info(`[rphub:panel] 未找到面板产物 ${PANEL_BUNDLE}。`
             + '把 RP助手 的构建产物放到 panel/rp-hub-panel.js（或跑 node tools/fetch-panel.mjs）即可启用面板。');
@@ -64,3 +71,76 @@ async function main() {
 }
 
 void main();
+
+/* ------------------------------ 诊断 RPC ------------------------------ */
+//
+// 页面 realm 里 `SillyTavern.getContext()` 可能是裁剪版（拿不到 characters/this_chid），
+// 而酒馆助手脚本 iframe 里是完整的。所以「当前卡是谁 / 卡内正则是否放行 / 放行与撤销」
+// 都由本 iframe 执行，页面只负责显示。
+
+function installRpc() {
+    const ctx = () => {
+        try { return SillyTavern.getContext(); } catch { return null; }
+    };
+
+    const currentChar = () => {
+        const c = ctx();
+        const ch = c?.characters?.[c.this_chid];
+        return { ctx: c, char: ch ?? null, avatar: ch?.avatar ?? null, name: ch?.name ?? null };
+    };
+
+    const handlers = {
+        'regex-state': () => {
+            const { ctx: c, avatar, name, char } = currentChar();
+            const list = c?.extensionSettings?.character_allowed_regex;
+            return {
+                hasContext: !!c,
+                hasCharacter: !!char,
+                avatar,
+                name,
+                allowed: Array.isArray(list) && avatar ? list.includes(avatar) : null,
+                characterCount: Array.isArray(c?.characters) ? c.characters.length : null,
+                thisChid: c?.this_chid ?? null,
+            };
+        },
+        'regex-set': ({ allow } = {}) => {
+            const { ctx: c, avatar } = currentChar();
+            if (!c) return { ok: false, reason: '没有酒馆上下文' };
+            if (!avatar) return { ok: false, reason: '未选中角色' };
+            c.extensionSettings = c.extensionSettings || {};
+            if (!Array.isArray(c.extensionSettings.character_allowed_regex)) {
+                c.extensionSettings.character_allowed_regex = [];
+            }
+            const list = c.extensionSettings.character_allowed_regex;
+            const idx = list.indexOf(avatar);
+            if (allow && idx < 0) list.push(avatar);
+            if (!allow && idx >= 0) list.splice(idx, 1);
+            try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
+            return { ok: true, allowed: !!allow, avatar, count: list.length };
+        },
+        'cards': () => {
+            const be = getLocalBackend();
+            if (!be?.base) return { ok: false, reason: '本地后端未安装' };
+            return fetch(`${be.base}/cards`).then((r) => (r.ok ? r.json() : { ok: false, reason: `HTTP ${r.status}` }));
+        },
+    };
+
+    window.addEventListener('message', async (event) => {
+        const data = event?.data;
+        if (!data || typeof data !== 'object' || data.type !== 'rphub:rpc') return;
+        const fn = handlers[data.method];
+        let result = null;
+        let error = null;
+        try {
+            if (!fn) error = `未知方法：${data.method}`;
+            else result = await fn(data.params || {});
+        } catch (e) {
+            error = e?.message || String(e);
+        }
+        try {
+            (event.source ?? window.parent)?.postMessage({ type: 'rphub:rpc:result', id: data.id, result, error }, '*');
+        } catch { /* 忽略 */ }
+    });
+
+    console.info('[rphub:panel] 诊断 RPC 已就绪（regex-state / regex-set / cards）。');
+}
