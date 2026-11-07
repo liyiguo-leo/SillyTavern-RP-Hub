@@ -22,6 +22,8 @@ let lastCards = null;      // GET /cards 结果
 let modeInfo = null;       // { text, notInLibrary }
 let autoState = null;      // { config, last } 来自 iframe 的 auto-get
 let frameInfo = null;      // 页面里的 iframe 概况（卡内前端就在这些 iframe 里）
+let cardScriptInfo = null; // 卡内脚本摘要（名字 + 交互特征命中数），自动带进复制报告
+let hostLogInfo = null;    // 宿主日志摘要（warn/error），自动带进复制报告
 /** iframe 消息环形记录（安卓端没有控制台，全部进面板） */
 const cardMessages = [];
 const CARD_MESSAGE_LIMIT = 40;
@@ -58,6 +60,57 @@ function scanFrames() {
             try { if (frame.document) sameOrigin++; } catch { /* 跨源 */ }
         }
         return { total: frames.length, sameOrigin };
+    } catch {
+        return null;
+    }
+}
+
+/** 卡内脚本摘要：只看“交互特征命中数”，不把整段代码塞进报告 */
+async function summarizeCardScripts() {
+    try {
+        const res = await rpc('card-scripts', {}, 12000);
+        const data = res?.result;
+        if (!data) return null;
+        const patterns = [
+            ['postMessage', /postMessage\s*\(/g],
+            ['send_textarea', /send_textarea/g],
+            ['triggerSlash', /triggerSlash/g],
+            ['parent.', /parent\./g],
+            ['TavernHelper.', /TavernHelper\./g],
+            ['insertOrReplace', /insertOrReplace/gi],
+            ['doLlm', /\bdoLlm|generateRaw|generate\(/g],
+            ['setChatMessages', /setChatMessages|createChatMessages/g],
+        ];
+        const scripts = (data.scripts || []).map((s) => {
+            const hits = {};
+            for (const [label, re] of patterns) {
+                const n = (s.content.match(re) || []).length;
+                if (n) hits[label] = n;
+            }
+            return { name: s.name, bytes: s.length, hits };
+        });
+        return {
+            extKeys: data.extKeys || [],
+            thKeys: data.thKeys || [],
+            count: data.scriptCount ?? scripts.length,
+            scripts,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/** 宿主日志摘要（TT dev API） */
+async function summarizeHostLogs() {
+    try {
+        const dev = await (window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__).then(() => window.__TAURITAVERN__?.api?.dev);
+        if (!dev?.frontendLogs?.list) return null;
+        const entries = await dev.frontendLogs.list({ limit: 300 });
+        return (entries || [])
+            .filter((e) => e.level === 'error' || e.level === 'warn'
+                || String(e.message || '').includes('rphub'))
+            .slice(-20)
+            .map((e) => `[${e.level}] ${String(e.message || '').slice(0, 300)}`);
     } catch {
         return null;
     }
@@ -332,6 +385,8 @@ export function installMenuEntry(onClick) {
         lastFailure: failure,
         recentRequests: recent,
         cardMessages: cardMessages.slice(-20),
+        cardScripts: cardScriptInfo,
+        hostLog: hostLogInfo,
     };
 }
 
@@ -795,6 +850,15 @@ async function refresh(panel, extra, { force = false } = {}) {
     if (autoRes?.result) autoState = autoRes.result;
 
     frameInfo = scanFrames();
+
+    // 自动收集「卡内脚本摘要 + 宿主日志」，让"复制报告"一次带全（安卓没法开控制台）
+    const [scriptsSummary, logsSummary] = await Promise.all([
+        summarizeCardScripts(),
+        summarizeHostLogs(),
+    ]);
+    if (scriptsSummary) cardScriptInfo = scriptsSummary;
+    if (logsSummary) hostLogInfo = logsSummary;
+
     modeInfo = await lookupMode(be);
     renderPanel(panel, extra);
 
@@ -851,11 +915,7 @@ export function mountDiagnostics(extra = {}) {
 
     btn.addEventListener('click', () => {
         const open = panel.style.display === 'none' || !panel.style.display;
-        panel.style.display = open ? 'block' : 'none';
-        if (open) {
-            panel.innerHTML = '<div style="font-size:11px">读取中…</div>';
-            void refresh(panel, extra);
-        }
+        if (open) { openPanel(); } else { panel.style.display = 'none'; }
     });
 
     document.body.appendChild(btn);
@@ -863,6 +923,8 @@ export function mountDiagnostics(extra = {}) {
 
     // 主入口：魔术棒菜单项（安卓上没有控制台，这个最好点）
     const openPanel = () => {
+        // 打开即开始后台记录 iframe 消息：关掉面板去点卡内按钮，再打开就能看到
+        try { window.__rphubTraceMessages = true; } catch { /* 忽略 */ }
         btn.style.display = '';
         panel.style.display = 'block';
         void refresh(panel, extra);
@@ -880,9 +942,7 @@ export function mountDiagnostics(extra = {}) {
             tapTimes.push(now);
             if (tapTimes.length >= 3) {
                 tapTimes = [];
-                btn.style.display = '';
-                panel.style.display = 'block';
-                void refresh(panel, extra);
+                openPanel();
                 toast('诊断面板已打开（左上角连点 3 次）');
             }
         }, true);
