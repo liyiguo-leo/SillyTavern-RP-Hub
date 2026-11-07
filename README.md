@@ -137,13 +137,25 @@ node tools/store-test.mjs      # 17 项：卡库分表（元数据不拖卡体�
 - `panel/rp-hub-panel.js`：`node tools/fetch-panel.mjs`（`--ref <tag>` 或 `--from <本地文件>`）。
 - 长期建议改成 subtree/submodule + 构建期拼装，避免手工同步漏文件。
 
-## 6. 已知边界
+## 6. 与酒馆内置「正则」的关系（重要）
+
+本扩展的引擎是酒馆正则的替代实现，**两者不能同时跑**，否则同一份正则会被执行两次（双重替换）：
+
+1. **关掉内置「正则」扩展**（系统扩展列表里那个 `正则`）。本仓 `src/` 引擎会接管显示/prompt 两条通道。
+2. **卡内 scoped 正则需要放行**：引擎取脚本用 `allowedOnly: true`，卡内正则必须出现在
+   `extension_settings.character_allowed_regex`（avatar 数组）里才会执行。
+   - ST 版：正则面板里有开关；
+   - TT 版（没有该面板）：打开右下角「RP-Hub 诊断」→ 本卡内嵌正则 → **允许 / 撤销**。
+3. 全局正则（`extension_settings.regex`）无需放行；预设正则需 `preset_allowed_regex`（TT 版暂未提供入口）。
+4. 关掉内置正则后，卡导入时酒馆不再弹「是否允许此卡正则」，所以第 2 步要手动点一次。
+
+## 7. 已知边界
 
 - 本地模式不实现 `/cards/{id}/st`（无 PNG 编码器）→ 明确 `501 LOCAL_NOT_IMPLEMENTED`。
 - IndexedDB 卡库与服务器库不互通；跨设备用 `exportLibrary()` / `importLibrary()`（`window.__rphub__` 未直接暴露，可在面板诊断或控制台调用 `local/store.js` 的导出函数）。
 - TT 变体的已知降级：无 `streamingProcessor` → 流式即时正则不生效；无 `getPresetManager` → 预设分组降级为安全空壳；`renderExtensionTemplateAsync` 返回空串（当前代码未使用）。
 
-## 7. 许可证
+## 8. 许可证
 
 各部件沿用上游：AGPL-3.0-or-later（RegexPlus / Backend），RP助手按其仓库 LICENSE；
 本仓新增的 `local/`、`panel/`、`variants/`、`tools/` 同 AGPL-3.0-or-later。

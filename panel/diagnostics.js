@@ -45,6 +45,69 @@ function backend() {
     try { return window.__rphubLocalBackend__ ?? null; } catch { return null; }
 }
 
+/* ---------------- 正则白名单（scoped 脚本的准入门槛） ----------------
+ * 引擎读脚本时 allowedOnly=true：卡内 scoped 正则必须出现在
+ * extension_settings.character_allowed_regex（avatar 数组）里才会被执行。
+ * 酒馆内置「正则」扩展会替用户写这份白名单，但**它一旦启用就会和本引擎双重替换**；
+ * 所以正确姿势是关掉内置正则，再由这里显式放行当前卡（或撤销）。
+ */
+function stContext() {
+    const pick = (w) => {
+        try { return w?.SillyTavern?.getContext?.() ?? null; } catch { return null; }
+    };
+    return pick(globalThis) || (typeof window !== 'undefined' ? pick(window.parent) : null) || null;
+}
+
+function currentAvatar() {
+    const c = stContext();
+    return c?.characters?.[c.this_chid]?.avatar || null;
+}
+
+function isScopedAllowed() {
+    const c = stContext();
+    const avatar = currentAvatar();
+    if (!c || !avatar) return null; // 未知（没选卡 / 无上下文）
+    const list = c.extensionSettings?.character_allowed_regex;
+    return Array.isArray(list) && list.includes(avatar);
+}
+
+function setScopedAllowed(allow) {
+    const c = stContext();
+    const avatar = currentAvatar();
+    if (!c || !avatar) return false;
+    c.extensionSettings = c.extensionSettings || {};
+    if (!Array.isArray(c.extensionSettings.character_allowed_regex)) {
+        c.extensionSettings.character_allowed_regex = [];
+    }
+    const list = c.extensionSettings.character_allowed_regex;
+    const idx = list.indexOf(avatar);
+    if (allow && idx < 0) list.push(avatar);
+    if (!allow && idx >= 0) list.splice(idx, 1);
+    try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
+    return true;
+}
+
+/** 查当前卡在本地库里的语义模式（rphub / st / 不在库） */
+async function lookupMode(extra) {
+    const be = backend();
+    if (!be) return '后端未安装';
+    const c = stContext();
+    const name = c?.characters?.[c.this_chid]?.name;
+    if (!name) return '未选中角色';
+    try {
+        const res = await fetch(`${be.base}/cards/by-name/${encodeURIComponent(name)}`);
+        if (res.status === 404) {
+            const probe = await fetch(`${be.base}/status`);
+            return probe.ok ? '卡不在本地库' : '后端不可达';
+        }
+        if (!res.ok) return '后端不可达';
+        const data = await res.json();
+        return `${data.formatDetail}${data.marked ? '（手动标记）' : ''}`;
+    } catch {
+        return '后端不可达';
+    }
+}
+
 /** 汇总诊断数据（同时供复制与 report() 使用） */
 export function collectReport(extra = {}) {
     const be = backend();
@@ -125,6 +188,13 @@ function renderPanel(panel, extra) {
         TT调试API=${report.host.hasTauriTavernDev ? '✓' : '✗'}<br>
         ${esc(report.note)}
       </div>
+      <div style="font-size:11px;background:#f2f6ff;border:1px solid #ccd9f2;border-radius:6px;padding:6px;margin-bottom:6px">
+        <b>正则引擎</b>：<span data-role="mode">查询中…</span><br>
+        本卡内嵌正则（scoped）：<b data-role="allowed">…</b>
+        <button data-act="allow" style="font-size:11px;padding:1px 6px;margin-left:6px;cursor:pointer">允许</button>
+        <button data-act="deny" style="font-size:11px;padding:1px 6px;cursor:pointer">撤销</button>
+        <div style="opacity:.75;margin-top:3px">同一份正则只能由一个引擎执行：请关闭酒馆内置「正则」扩展，再在这里显式放行本卡。</div>
+      </div>
       ${f ? `<div style="font-size:11px;background:#fff3f3;border:1px solid #f3c9c9;border-radius:6px;padding:6px;margin-bottom:6px">
         <b>最近失败</b>：${esc(f.method)} ${esc(f.path)} → <b style="color:#d33">${f.status}</b> ${esc(f.code)}<br>
         ${esc(f.message)}<br>
@@ -142,6 +212,26 @@ function renderPanel(panel, extra) {
     `;
 
     panel.querySelector('[data-act="close"]').addEventListener('click', () => { panel.style.display = 'none'; });
+
+    // 正则白名单：显示 + 一键放行/撤销（scoped 脚本必须在这里放行才会被执行）
+    const modeEl = panel.querySelector('[data-role="mode"]');
+    const allowedEl = panel.querySelector('[data-role="allowed"]');
+    const syncAllowed = () => {
+        const value = isScopedAllowed();
+        allowedEl.textContent = value === null ? '未知（未选中角色）' : (value ? '已允许' : '未允许');
+        allowedEl.style.color = value ? '#1f8a4c' : '#c22';
+    };
+    syncAllowed();
+    lookupMode(extra).then((text) => { if (modeEl) modeEl.textContent = text; }).catch(() => { /* 忽略 */ });
+
+    panel.querySelector('[data-act="allow"]').addEventListener('click', () => {
+        if (setScopedAllowed(true)) { syncAllowed(); toast('已允许本卡内嵌正则；重新打开聊天或强制重渲染后生效'); }
+        else toast('写入失败：没有拿到酒馆上下文');
+    });
+    panel.querySelector('[data-act="deny"]').addEventListener('click', () => {
+        if (setScopedAllowed(false)) { syncAllowed(); toast('已撤销本卡内嵌正则的允许'); }
+        else toast('写入失败：没有拿到酒馆上下文');
+    });
     panel.querySelector('[data-act="copy"]').addEventListener('click', async () => {
         const ok = await copyText(reportText(extra));
         toast(ok ? '诊断报告已复制到剪贴板' : '复制失败：请手动从面板抄写');
