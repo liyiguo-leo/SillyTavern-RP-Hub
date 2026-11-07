@@ -18,6 +18,18 @@ let lastState = null;      // 来自 iframe 的 regex-state
 let lastCards = null;      // GET /cards 结果
 let modeInfo = null;       // { text, notInLibrary }
 let autoState = null;      // { config, last } 来自 iframe 的 auto-get
+/** iframe 消息环形记录（安卓端没有控制台，全部进面板） */
+const cardMessages = [];
+const CARD_MESSAGE_LIMIT = 40;
+
+function pushCardMessage(entry) {
+    cardMessages.push({ at: new Date().toLocaleTimeString(), ...entry });
+    while (cardMessages.length > CARD_MESSAGE_LIMIT) cardMessages.shift();
+    const panel = document.getElementById(PANEL_ID);
+    if (panel && panel.style.display !== 'none' && typeof window.__rphubRenderDiagnostics === 'function') {
+        window.__rphubRenderDiagnostics();
+    }
+}
 
 const pendingRpc = new Map();
 
@@ -93,9 +105,32 @@ try {
                     window.toastr.error(`卡处理失败：${forwardedFailure.status} ${code}`, 'RP-Hub', { timeOut: 10000 });
                 }
             } catch { /* 忽略 */ }
-            if (typeof window.__rphubRenderDiagnostics === 'function') window.__rphubRenderDiagnostics();
             try { window.__rphubShowDiagnostics?.(); } catch { /* 忽略 */ }
+            if (typeof window.__rphubRenderDiagnostics === 'function') window.__rphubRenderDiagnostics();
+            return;
         }
+
+        // 其余消息：可能是卡内前端发给宿主的交互指令（填输入框/发送等）
+        const tracing = !!window.__rphubTraceMessages;
+        const panel = document.getElementById(PANEL_ID);
+        const panelOpen = !!panel && panel.style.display !== 'none';
+        if (!tracing && !panelOpen) return;
+        const keys = Object.keys(data).slice(0, 8);
+        const previewText = ['text', 'content', 'value', 'message', 'prompt']
+            .map((k) => (typeof data[k] === 'string' ? data[k] : null))
+            .find(Boolean) || '';
+        pushCardMessage({
+            kind: 'iframe',
+            type: String(data.type ?? data.action ?? data.event ?? data.command ?? '(无 type)'),
+            keys,
+            preview: previewText.slice(0, 60),
+        });
+    });
+
+    // 卡内消息桥的处理结果也进面板（安卓看不到 console）
+    window.addEventListener('rphub:card-bridge', (event) => {
+        const d = event?.detail || {};
+        pushCardMessage({ kind: 'bridge', type: d.type || '(bridge)', keys: [], preview: String(d.text || '').slice(0, 60), ok: d.ok, sent: d.sent });
     });
 } catch { /* 忽略 */ }
 
@@ -200,6 +235,7 @@ export function traceIframeMessages(enable = true) {
         library: lastCards ? { count: lastCards.count, names: (lastCards.cards || []).slice(0, 10).map((c) => c.characterName) } : null,
         lastFailure: failure,
         recentRequests: recent,
+        cardMessages: cardMessages.slice(-20),
     };
 }
 
@@ -312,6 +348,14 @@ function renderPanel(panel, extra) {
           <button data-act="trace-msg" style="font-size:11px;padding:1px 8px">追踪 iframe 消息</button>
         </div>
         <div data-role="scripts" style="margin-top:4px;max-height:190px;overflow:auto"></div>
+      </div>
+
+      <div style="font-size:11px;margin-bottom:6px">
+        <b>卡内消息（最近 ${cardMessages.length}）</b>
+        <div style="max-height:120px;overflow:auto;font-size:10px;margin-top:2px">
+          ${cardMessages.slice(-8).map((m) => `<div style="word-break:break-all"><span style="opacity:.55">${esc(m.at)}</span> [${esc(m.kind)}] ${esc(m.type)}${m.preview ? ` · ${esc(m.preview)}` : ''}${m.ok === false ? ' · 写入失败' : ''}${m.sent ? ' · 已发送' : ''}</div>`).join('')
+            || '<div style="opacity:.6">暂无。点下面「追踪 iframe 消息」，再操作卡里的按钮，这里就会出现。</div>'}
+        </div>
       </div>
 
       <div style="font-size:11px;margin-bottom:6px;word-break:break-all">
@@ -709,6 +753,24 @@ export function mountDiagnostics(extra = {}) {
 
     document.body.appendChild(btn);
     document.body.appendChild(panel);
+
+    // 安卓端没有控制台：左上角连点 3 次即可呼出面板
+    try {
+        let tapTimes = [];
+        document.addEventListener('pointerdown', (event) => {
+            if (!(event.clientX < 56 && event.clientY < 56)) { tapTimes = []; return; }
+            const now = Date.now();
+            tapTimes = tapTimes.filter((t) => now - t < 1200);
+            tapTimes.push(now);
+            if (tapTimes.length >= 3) {
+                tapTimes = [];
+                btn.style.display = '';
+                panel.style.display = 'block';
+                void refresh(panel, extra);
+                toast('诊断面板已打开（左上角连点 3 次）');
+            }
+        }, true);
+    } catch { /* 忽略 */ }
 
     // 点按期间不重绘（否则 mousedown 后重绘会吞掉 click）
     panel.addEventListener('pointerdown', () => { interacting = true; }, true);
