@@ -22,6 +22,7 @@ let lastCards = null;      // GET /cards 结果
 let modeInfo = null;       // { text, notInLibrary }
 let autoState = null;      // { config, last } 来自 iframe 的 auto-get
 let frameInfo = null;      // 页面里的 iframe 概况（卡内前端就在这些 iframe 里）
+let thFrameInfo = null;    // 酒馆助手前端 iframe 审计（数量 / 重复 id）
 let cardScriptInfo = null; // 卡内脚本摘要（名字 + 交互特征命中数），自动带进复制报告
 let hostLogInfo = null;    // 宿主日志摘要（warn/error），自动带进复制报告
 /** iframe 消息环形记录（安卓端没有控制台，全部进面板） */
@@ -60,6 +61,24 @@ function scanFrames() {
             try { if (frame.document) sameOrigin++; } catch { /* 跨源 */ }
         }
         return { total: frames.length, sameOrigin };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * 酒馆助手前端 iframe 审计：数量 + 重复 id。
+ * TT 的 EmbeddedRuntimeManager 会拒绝注册重复 id（`id already registered`），
+ * 一旦出现重复，那个 iframe 的运行时就不会起来 —— 卡内按钮自然没反应。
+ */
+function scanThFrames() {
+    try {
+        const iframes = Array.from(document.querySelectorAll('iframe[id^="TH-message--"], iframe.TH-render, .TH-render iframe'));
+        const ids = iframes.map((el) => el.id).filter(Boolean);
+        const counts = {};
+        for (const id of ids) counts[id] = (counts[id] || 0) + 1;
+        const duplicates = Object.entries(counts).filter(([, n]) => n > 1).map(([id, n]) => `${id}×${n}`);
+        return { total: iframes.length, ids: ids.slice(0, 10), duplicates };
     } catch {
         return null;
     }
@@ -387,6 +406,7 @@ export function installMenuEntry(onClick) {
         cardMessages: cardMessages.slice(-20),
         cardScripts: cardScriptInfo,
         hostLog: hostLogInfo,
+        thFrames: thFrameInfo,
     };
 }
 
@@ -465,6 +485,7 @@ function renderPanel(panel, extra) {
         后端：<b>${esc(report.backend?.mode ?? '未安装')}</b>${report.backend?.base ? `<br><span style="opacity:.7">${esc(report.backend.base)}</span>` : ''}<br>
         宿主：ST=${report.host.hasSillyTavern ? '✓' : '✗'} · 酒馆助手=${report.host.hasTavernHelper ? '✓' : '✗'} · TT调试API=${report.host.hasTauriTavernDev ? '✓' : '✗'}
         ${frameInfo ? `<br>页面 iframe：${frameInfo.total} 个（同源可读 ${frameInfo.sameOrigin} 个）` : ''}
+        ${thFrameInfo ? `<br>酒馆助手前端 iframe：${thFrameInfo.total} 个${thFrameInfo.duplicates?.length ? ` · <b style="color:#c22">重复 id：${esc(thFrameInfo.duplicates.join('、'))}</b>` : ' · 无重复 id'}` : ''}
       </div>
 
       <div style="font-size:11px;background:#f7f4ff;border:1px solid #d9d2f0;border-radius:6px;padding:6px;margin-bottom:6px">
@@ -860,6 +881,7 @@ async function refresh(panel, extra, { force = false } = {}) {
     if (autoRes?.result) autoState = autoRes.result;
 
     frameInfo = scanFrames();
+    thFrameInfo = scanThFrames();
 
     // 自动收集「卡内脚本摘要 + 宿主日志」，让"复制报告"一次带全（安卓没法开控制台）
     const [scriptsSummary, logsSummary] = await Promise.all([
