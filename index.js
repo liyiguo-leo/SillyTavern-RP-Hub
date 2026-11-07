@@ -9,6 +9,7 @@
 import { installLocalBackend } from './local/fetch-shim.js';
 import { importToSt } from './panel/st-import.js';
 import { probeEnvironment, checkCoreScript } from './local/compat.js';
+import { mountRegexTerminal } from './panel/regex-terminal.js';
 import { EXTENSION_VERSION } from './local/constants.js';
 
 export const EXTENSION_URL = new URL('./', import.meta.url).href;
@@ -20,6 +21,13 @@ export async function init() {
         backendInfo = await installLocalBackend({ hooks: { importToSt } });
     } catch (error) {
         console.error('[rphub] 本地后端安装失败：', error);
+    }
+
+    // 正则管理终端（魔术棒菜单入口；逐条开关角色卡/全局正则）
+    try {
+        mountRegexTerminal();
+    } catch (error) {
+        console.warn('[rphub] 正则管理终端挂载失败：', error);
     }
 
     try {
