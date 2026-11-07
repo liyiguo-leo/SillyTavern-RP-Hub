@@ -158,7 +158,22 @@ RP助手 原始文案是 `RP 卡已上传：…（判定：本地）`，其中�
 `识别通道：前端判定为 RP 卡`（`tools/patch-panel.mjs`，精确替换，命中数为 0 会构建失败）。
 
 
-## 7. 与酒馆内置「正则」的关系（重要）
+## 7. 正则管理终端（逐条开关）
+
+魔术棒菜单 → **「RP-Hub 正则管理」**：
+
+- 两个标签：**角色卡**（`characters[i].data.extensions.regex_scripts`）/ **全局**（`extension_settings.regex`）；
+- 每条显示可辨认的名字：`scriptName` → `name` → `findRegex` 截断
+  （酒馆正则面板只读 `scriptName`，所以 RP-Hub 卡里用 `name` 的条目会显示成“未命名”）；
+- 逐条勾选 = 立即写回（角色卡走 `TavernHelper.updateCharacterWith`，全局走 `saveSettingsDebounced`）；
+- 顶部「允许本卡正则」= `character_allowed_regex` 总开关：不勾则整组不执行；
+- 支持搜索（名称/正则）与「仅启用」过滤。
+
+想只关掉字体、颜色之类的几条：打开终端 → 搜 `font` / `color` / `字体` / `颜色` → 取消勾选即可。
+
+关闭入口：地址加 `?rphub=noregex`，或 `localStorage.setItem('rphub:no-regex-terminal','1')`。
+
+## 8. 与酒馆内置「正则」的关系（重要）
 
 本扩展的引擎是酒馆正则的替代实现，**两者不能同时跑**，否则同一份正则会被执行两次（双重替换）：
 
@@ -170,13 +185,13 @@ RP助手 原始文案是 `RP 卡已上传：…（判定：本地）`，其中�
 3. 全局正则（`extension_settings.regex`）无需放行；预设正则需 `preset_allowed_regex`（TT 版暂未提供入口）。
 4. 关掉内置正则后，卡导入时酒馆不再弹「是否允许此卡正则」，所以第 2 步要手动点一次。
 
-## 8. 已知边界
+## 9. 已知边界
 
 - 本地模式不实现 `/cards/{id}/st`（无 PNG 编码器）→ 明确 `501 LOCAL_NOT_IMPLEMENTED`。
 - IndexedDB 卡库与服务器库不互通；跨设备用 `exportLibrary()` / `importLibrary()`（可在控制台调用 `local/store.js` 的导出函数）。
 - TT 变体的已知降级：无 `streamingProcessor` → 流式即时正则不生效；无 `getPresetManager` → 预设分组降级为安全空壳；`renderExtensionTemplateAsync` 返回空串（当前代码未使用）。
 
-## 9. 许可证
+## 10. 许可证
 
 各部件沿用上游：AGPL-3.0-or-later（RegexPlus / Backend），RP助手按其仓库 LICENSE；
 本仓新增的 `local/`、`panel/`、`variants/`、`tools/` 同 AGPL-3.0-or-later。
