@@ -76,6 +76,40 @@ function toBytes(input) {
     return new Uint8Array(0);
 }
 
+/* ------------------------------ 失败现场 ------------------------------ */
+
+/** 最近一次失败请求的快照（TT 真机排障用：window.__rphubLocalBackend__.lastFailure） */
+let lastFailure = null;
+
+export function getLastFailure() {
+    return lastFailure;
+}
+
+function headHex(bytes, count = 16) {
+    if (!bytes || bytes.length === 0) return '';
+    return Array.from(bytes.subarray(0, count)).map((b) => b.toString(16).padStart(2, '0')).join(' ');
+}
+
+function recordFailure({ method, path, status, code, message, bytes }) {
+    lastFailure = {
+        at: new Date().toISOString(),
+        method,
+        path,
+        status,
+        code,
+        message,
+        byteLength: bytes ? bytes.length : 0,
+        headHex: headHex(bytes),
+        hint: status === 422 && bytes && bytes.length > 0
+            ? '首字节既不是 PNG 签名也不是 JSON 起始符：可能是 .charx/.byaf（zip 容器）或带特殊编码的文本卡'
+            : (bytes && bytes.length === 0 ? '请求体为空：拖入的是文件还是纯文本/链接？' : ''),
+    };
+    try {
+        if (typeof globalThis !== 'undefined') globalThis.__rphubLocalLastFailure__ = lastFailure;
+    } catch { /* 忽略 */ }
+    return lastFailure;
+}
+
 /* --------------------------------- 路由 --------------------------------- */
 
 /**
@@ -99,7 +133,11 @@ export async function handleRequest(req) {
         /* ---------- POST /cards/upload ---------- */
         if (method === 'POST' && seg[0] === 'cards' && seg[1] === 'upload') {
             const bytes = toBytes(req.body);
-            if (bytes.length === 0) return err(422, 'EMPTY_BODY', '上传内容为空');
+            if (bytes.length === 0) {
+                const message = '上传内容为空：请求体 0 字节（拖入的是链接/纯文本，还是文件读取失败？）';
+                recordFailure({ method, path, status: 422, code: 'EMPTY_BODY', message, bytes });
+                return err(422, 'EMPTY_BODY', message);
+            }
 
             let sourceFile = typeof headers['x-filename'] === 'string' ? headers['x-filename'] : null;
             if (sourceFile) { try { sourceFile = decodeURIComponent(sourceFile); } catch { /* 原样 */ } }
@@ -185,7 +223,11 @@ export async function handleRequest(req) {
         /* ---------- POST /cards/analyze ---------- */
         if (method === 'POST' && seg[0] === 'cards' && seg[1] === 'analyze') {
             const bytes = toBytes(req.body);
-            if (bytes.length === 0) return err(422, 'EMPTY_BODY', '分析内容为空');
+            if (bytes.length === 0) {
+                const message = '分析内容为空：请求体 0 字节（拖入的是链接/纯文本，还是文件读取失败？）';
+                recordFailure({ method, path, status: 422, code: 'EMPTY_BODY', message, bytes });
+                return err(422, 'EMPTY_BODY', message);
+            }
 
             const contentHash = sha256HexBytes(bytes);
             const marksData = await readMarks();
@@ -398,8 +440,11 @@ export async function handleRequest(req) {
     } catch (e) {
         // 4xx 是契约内的正常拒绝（未知格式/坏卡），只 warn；5xx 才是实现问题
         const status = e?.code === 'UNSUPPORTED_FORMAT' ? 422 : 500;
+        const baseMessage = e instanceof Error ? e.message : String(e);
+        const withHead = status === 422 ? `${baseMessage}（请求体 ${req.body?.length ?? 0} 字节，前 16 字节：${headHex(req.body)}）` : baseMessage;
         const log = status >= 500 ? console.error : console.warn;
-        log('[rphub-local] 请求未完成：', e?.message || e);
-        return err(status, e?.code || 'INTERNAL', e instanceof Error ? e.message : String(e));
+        log(`[rphub-local] ${method} ${path} 未完成：`, withHead);
+        recordFailure({ method, path, status, code: e?.code || 'INTERNAL', message: withHead, bytes: req.body });
+        return err(status, e?.code || 'INTERNAL', withHead);
     }
 }

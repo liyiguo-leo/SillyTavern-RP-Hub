@@ -7,7 +7,7 @@
 //
 // 运行：node tools/api-test.mjs
 
-import { handleRequest } from '../local/api.js';
+import { handleRequest, getLastFailure } from '../local/api.js';
 import { buildPng, rpCardJson, stCardJson } from './fixtures.mjs';
 
 let failed = 0;
@@ -108,6 +108,39 @@ console.log('\n[6] 错误路径');
     ok(nf.status === 404, '不存在的 cardId → 404', String(nf.status));
     const route = await call('GET', '/nope');
     ok(route.status === 404 && route.body.error.code === 'ROUTE_NOT_FOUND', '未知路径 → ROUTE_NOT_FOUND', route.body.error?.code);
+}
+
+console.log('\n[7] 编码 / 容器兼容（真实世界 422 的两大来源）');
+{
+    const json = JSON.stringify(rpCardJson());
+    const utf8 = new TextEncoder().encode(json);
+
+    const bomUtf8 = new Uint8Array(3 + utf8.length);
+    bomUtf8.set([0xef, 0xbb, 0xbf]);
+    bomUtf8.set(utf8, 3);
+    const r1 = await call('POST', '/cards/analyze', { body: bomUtf8, headers: { 'x-filename': 'bom.json' } });
+    ok(r1.status === 200 && r1.body.features.some((f) => f.startsWith('rphub_')), 'UTF-8 BOM 的 JSON 卡可识别', `status=${r1.status}`);
+
+    const u16 = new Uint8Array(2 + json.length * 2);
+    u16[0] = 0xff; u16[1] = 0xfe;
+    for (let i = 0; i < json.length; i++) {
+        const code = json.charCodeAt(i);
+        u16[2 + i * 2] = code & 0xff;
+        u16[3 + i * 2] = code >> 8;
+    }
+    const r2 = await call('POST', '/cards/analyze', { body: u16, headers: { 'x-filename': 'u16.json' } });
+    ok(r2.status === 200, 'UTF-16LE + BOM 的 JSON 卡可识别', `status=${r2.status}`);
+
+    const zip = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0, 0, 0, 0, 0]);
+    const r3 = await call('POST', '/cards/analyze', { body: zip, headers: { 'x-filename': 'card.charx' } });
+    ok(r3.status === 422 && r3.body.error.code === 'UNSUPPORTED_FORMAT', 'zip 容器（.charx/.byaf）→ 422', `${r3.status}/${r3.body.error?.code}`);
+    const snapshot = getLastFailure();
+    ok(snapshot?.status === 422 && String(snapshot.headHex).startsWith('50 4b'), '失败快照记下首字节', snapshot?.headHex);
+    ok(typeof snapshot?.hint === 'string' && snapshot.hint.length > 0, '失败快照带排查提示', `${String(snapshot?.hint).slice(0, 20)}…`);
+
+    const empty = await call('POST', '/cards/analyze', { body: new Uint8Array(0), headers: { 'x-filename': 'empty.png' } });
+    ok(empty.status === 422 && empty.body.error.code === 'EMPTY_BODY', '空请求体 → EMPTY_BODY', `${empty.status}/${empty.body.error?.code}`);
+    ok(getLastFailure()?.byteLength === 0, '空请求体也在快照里注明 0 字节');
 }
 
 console.log(`\n=== ${failed === 0 ? '全部通过' : `${failed} 项失败`} ===`);

@@ -13,7 +13,7 @@
 //
 // 幂等：同一 realm 重复调用只换 hooks，不重复 patch。
 
-import { handleRequest } from './api.js';
+import { handleRequest, getLastFailure } from './api.js';
 import { API_BASE_PATH } from './constants.js';
 
 const SHIM_KEY = Symbol.for('rphub.local.backend');
@@ -37,7 +37,16 @@ function toBytes(body) {
     if (body instanceof Uint8Array) return body;
     if (body instanceof ArrayBuffer) return new Uint8Array(body);
     if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
-    return null; // Blob / FormData / string：本接口不使用
+    return null; // Blob / FormData / string：由 toBytesAsync 处理
+}
+
+/** 支持 Blob/File 作为 body（某些拖拽实现直接给 File 而不是 arrayBuffer） */
+async function toBytesAsync(body) {
+    if (!body) return null;
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+        return new Uint8Array(await body.arrayBuffer());
+    }
+    return toBytes(body);
 }
 
 function headersToObject(headers) {
@@ -113,7 +122,7 @@ export async function installLocalBackend(options = {}) {
             const path = parsed.pathname.slice(new URL(state.base).pathname.length) || '/';
             const method = String(init.method || (input && input.method) || 'GET').toUpperCase();
             const headers = headersToObject(init.headers || (input && input.headers));
-            const body = toBytes(init.body);
+            const body = await toBytesAsync(init.body);
 
             let jsonBody = null;
             if (body && body.length) {
@@ -159,6 +168,8 @@ export async function installLocalBackend(options = {}) {
             ...info,
             version: '0.1.0-local',
             api: handle,
+            /** 最近一次失败请求的快照（TT 排障：__rphubLocalBackend__.lastFailure()） */
+            lastFailure: () => getLastFailure(),
             reload: () => installLocalBackend({ base, mode: requested, hooks: state.hooks }),
             _state: state,
         };

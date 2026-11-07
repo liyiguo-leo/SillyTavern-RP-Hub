@@ -3,8 +3,6 @@
 
 import { isPlainObject } from '../util.js';
 
-const decoder = new TextDecoder('utf-8');
-
 function isPlausibleCharacterObject(obj) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
     if (typeof obj.spec === 'string' && /^chara_card_v[23]$/.test(obj.spec)) return true;
@@ -50,12 +48,29 @@ function detectSpec(dataObj) {
 }
 
 /**
+ * 按 BOM 选择解码器（UTF-8 / UTF-16LE / UTF-16BE），并兜底去掉残留 BOM。
+ * 真实卡片里 UTF-16 + BOM 的导出并不少见（部分 Windows 工具/表格导出）。
+ */
+function decodeText(bytes) {
+    let text;
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        text = new TextDecoder('utf-8').decode(bytes.subarray(3));
+    } else if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+        text = new TextDecoder('utf-16le').decode(bytes.subarray(2));
+    } else if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+        text = new TextDecoder('utf-16be').decode(bytes.subarray(2));
+    } else {
+        text = new TextDecoder('utf-8').decode(bytes);
+    }
+    return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
  * JSON 字节 → { spec, data, blocks, features }
  * @param {Uint8Array} bytes
  */
 export function parseJson(bytes) {
-    let text = decoder.decode(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
-    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    let text = decodeText(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
 
     let parsed;
     try {

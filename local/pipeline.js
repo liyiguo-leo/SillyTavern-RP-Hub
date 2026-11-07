@@ -11,10 +11,23 @@ import { isPlainObject } from './util.js';
 
 const WHITESPACE = new Set([0x20, 0x09, 0x0a, 0x0d, 0x0c]);
 
-/** 格式嗅探：只依据字节魔数，不看文件名 */
+/**
+ * 格式嗅探：只依据字节魔数，不看文件名。
+ *
+ * BOM 处理（v2 修复）：很多 Windows 工具导出的卡片 JSON 带 UTF-8 / UTF-16 BOM，
+ * 旧实现只看首字节 → 0xEF / 0xFF 既不等于 `{` 也不等于 `[`，直接判成“未知格式”→ 422。
+ * 现在先跳过 BOM，UTF-16 直接按 JSON 处理（parseJson 会按 BOM 选解码器）。
+ */
 export function sniffFormat(bytes) {
     if (isPng(bytes)) return 'png';
+
     let start = 0;
+    if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        start = 3; // UTF-8 BOM
+    } else if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff)) {
+        return 'json'; // UTF-16（LE/BE）BOM：只可能是文本卡
+    }
+
     while (start < bytes.length && WHITESPACE.has(bytes[start])) start++;
     if (start >= bytes.length) return null;
     const first = bytes[start];
