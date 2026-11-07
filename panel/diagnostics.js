@@ -11,6 +11,7 @@
 
 const PANEL_ID = 'rphub-diagnostics-panel';
 const BTN_ID = 'rphub-diagnostics-btn';
+const DISABLE_KEY = 'rphub:no-diagnostics';
 
 let forwardedFailure = null;
 let lastState = null;      // 来自 iframe 的 regex-state
@@ -98,8 +99,61 @@ try {
     });
 } catch { /* 忽略 */ }
 
-/** 汇总诊断（复制/报告用） */
-export function collectReport(extra = {}) {
+/**
+ * 彻底移除诊断浮层（并记住下次不再挂载）。
+ * 用途：排查「面板点不动」时，用来排除是不是浮层挡住/抢了点击。
+ */
+export function disableDiagnostics() {
+    try { document.getElementById(BTN_ID)?.remove(); } catch { /* 忽略 */ }
+    try { document.getElementById(PANEL_ID)?.remove(); } catch { /* 忽略 */ }
+    try { localStorage.setItem(DISABLE_KEY, '1'); } catch { /* 忽略 */ }
+    console.info('[rphub] 诊断浮层已移除，并会在下次启动时跳过挂载（清除 localStorage 的 rphub:no-diagnostics 可恢复）');
+}
+
+/** 诊断是否被用户关闭 */
+export function isDiagnosticsDisabled() {
+    try {
+        if (/[?&]rphub=nopanel\b/.test(location.search)) return true;
+        return localStorage.getItem(DISABLE_KEY) === '1';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 下一次点击的「最上层元素栈」，用来找出是谁在拦截点击。
+ * 返回 Promise<{target, stack}>：stack[0] 就是点击落到的元素。
+ */
+export function probeNextClick(timeoutMs = 20000) {
+    return new Promise((resolve) => {
+        const handler = (event) => {
+            cleanup();
+            const stack = (() => {
+                try {
+                    return (document.elementsFromPoint?.(event.clientX, event.clientY) || [])
+                        .slice(0, 6)
+                        .map((el) => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ''}${el.className && typeof el.className === 'string' ? `.${el.className.split(/\s+/).slice(0, 2).join('.')}` : ''}`);
+                } catch {
+                    return [];
+                }
+            })();
+            const result = { target: event.target, stack, x: event.clientX, y: event.clientY };
+            console.info('[rphub] 点击落点最上层元素：', stack, event.target);
+            resolve(result);
+        };
+        const timer = setTimeout(() => { cleanup(); resolve(null); }, timeoutMs);
+        const cleanup = () => {
+            clearTimeout(timer);
+            document.removeEventListener('click', handler, true);
+            document.removeEventListener('pointerdown', handler, true);
+        };
+        document.addEventListener('click', handler, true);
+        document.addEventListener('pointerdown', handler, true);
+        console.info('[rphub] 已挂上点击探针：点一下你点不动的那个控件');
+    });
+}
+
+/** 汇总诊断（复制/报告用） */export function collectReport(extra = {}) {
     const be = backend();
     const recent = typeof be?.recent === 'function' ? be.recent() : [];
     const failure = (typeof be?.lastFailure === 'function' ? be.lastFailure() : null) || forwardedFailure;
@@ -490,7 +544,14 @@ async function lookupMode(be) {
 }
 
 /** 拉取 iframe 状态 + 卡库 + 当前卡模式，然后一次性重绘 */
-async function refresh(panel, extra) {
+/** 正在点按面板时不要重绘（重绘会换掉 DOM，导致点击丢在旧节点上） */
+let interacting = false;
+let lastRefreshAt = 0;
+
+async function refresh(panel, extra, { force = false } = {}) {
+    if (interacting && !force) return;
+    if (!force && Date.now() - lastRefreshAt < 200) return;
+    lastRefreshAt = Date.now();
     const be = backend();
     const [stateRes, cardsRes, autoRes] = await Promise.all([
         rpc('regex-state'),
@@ -517,6 +578,10 @@ async function refresh(panel, extra) {
  */
 export function mountDiagnostics(extra = {}) {
     if (typeof document === 'undefined' || !document.body) return null;
+    if (isDiagnosticsDisabled()) {
+        console.info('[rphub] 诊断浮层已被禁用（?rphub=nopanel 或 localStorage rphub:no-diagnostics）');
+        return null;
+    }
     if (document.getElementById(BTN_ID)) return document.getElementById(PANEL_ID);
 
     const btn = document.createElement('button');
@@ -562,6 +627,11 @@ export function mountDiagnostics(extra = {}) {
     document.body.appendChild(btn);
     document.body.appendChild(panel);
 
+    // 点按期间不重绘（否则 mousedown 后重绘会吞掉 click）
+    panel.addEventListener('pointerdown', () => { interacting = true; }, true);
+    window.addEventListener('pointerup', () => { setTimeout(() => { interacting = false; }, 0); }, true);
+    panel.style.pointerEvents = 'auto';
+
     // 供 iframe 转发失败时重绘
     window.__rphubRenderDiagnostics = () => { if (panel.style.display !== 'none') void refresh(panel, extra); };
 
@@ -576,7 +646,7 @@ export function mountDiagnostics(extra = {}) {
                 }
             } catch { /* 忽略 */ }
             panel.style.display = 'block';
-            renderPanel(panel, extra);
+            void refresh(panel, extra);
             try { window.__rphubShowDiagnostics?.(); } catch { /* 忽略 */ }
         });
     }

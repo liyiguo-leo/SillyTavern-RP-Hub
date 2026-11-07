@@ -11,7 +11,7 @@
 import { installLocalBackend } from './local/fetch-shim.js';
 import { importToSt } from './panel/st-import.js';
 import { probeEnvironment, checkCoreScript } from './local/compat.js';
-import { mountDiagnostics, reportText } from './panel/diagnostics.js';
+import { mountDiagnostics, reportText, disableDiagnostics, probeNextClick } from './panel/diagnostics.js';
 import { EXTENSION_VERSION } from './local/constants.js';
 
 export const EXTENSION_URL = new URL('./', import.meta.url).href;
@@ -81,5 +81,9 @@ try {
         compat: probeEnvironment,
         checkCoreScript,
         report: () => reportText({ version: EXTENSION_VERSION }),
+        /** 点不动排查：先调用，再点那个点不动的控件，控制台会打印最上层元素 */
+        probeClick: () => probeNextClick(),
+        /** 彻底移除诊断浮层（下次启动也不挂载）；恢复：localStorage.removeItem('rphub:no-diagnostics') */
+        disableDiagnostics: () => disableDiagnostics(),
     };
 } catch { /* 忽略 */ }
