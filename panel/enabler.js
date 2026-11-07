@@ -29,6 +29,21 @@ async function main() {
         console.warn('[rphub:panel] 本地后端安装失败，面板将依赖服务端插件：', e);
     }
 
+    // 失败上报：本 realm 是隐藏 iframe，界面不可见 → 转发给父页面（诊断浮层会展示）
+    try {
+        const be = getLocalBackend();
+        if (be?.onFailure) {
+            be.onFailure((failure) => {
+                try {
+                    (window.parent ?? window.top ?? window).postMessage(
+                        { type: 'rphub:failure', payload: failure },
+                        '*',
+                    );
+                } catch { /* 跨源时忽略 */ }
+            });
+        }
+    } catch { /* 忽略 */ }
+
     if (!await panelBundleExists()) {
         console.info(`[rphub:panel] 未找到面板产物 ${PANEL_BUNDLE}。`
             + '把 RP助手 的构建产物放到 panel/rp-hub-panel.js（或跑 node tools/fetch-panel.mjs）即可启用面板。');

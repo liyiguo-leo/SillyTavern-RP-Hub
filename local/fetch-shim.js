@@ -87,6 +87,9 @@ export async function installLocalBackend(options = {}) {
             mode: 'off',
             hooks: {},
             originalFetch: win.fetch ? win.fetch.bind(win) : null,
+            /** 最近请求的环形记录（诊断面板用：判断请求到底有没有到本地后端） */
+            recent: [],
+            onFailure: null,
         };
     }
     const state = win[SHIM_KEY];
@@ -136,6 +139,16 @@ export async function installLocalBackend(options = {}) {
             }
 
             const result = await handle(method, path, { query: parsed.searchParams, headers, body, jsonBody });
+
+            // 记录 + 失败上报（诊断面板/提示用，不改变返回值）
+            try {
+                state.recent.push({ at: Date.now(), method, path, status: result.status, byteLength: body ? body.length : 0 });
+                if (state.recent.length > 20) state.recent.shift();
+                if (result.status >= 400 && typeof state.onFailure === 'function') {
+                    state.onFailure({ method, path, status: result.status, body: result.body, byteLength: body ? body.length : 0 });
+                }
+            } catch { /* 诊断失败不影响主流程 */ }
+
             return jsonResponse(result.status, result.body);
         };
         state.patched = true;
@@ -170,6 +183,10 @@ export async function installLocalBackend(options = {}) {
             api: handle,
             /** 最近一次失败请求的快照（TT 排障：__rphubLocalBackend__.lastFailure()） */
             lastFailure: () => getLastFailure(),
+            /** 最近 20 次接口请求（判断请求是否真的到达本地后端） */
+            recent: () => (state.recent ? state.recent.slice().reverse() : []),
+            /** 订阅失败事件（诊断面板用）；传 null 取消 */
+            onFailure: (fn) => { state.onFailure = typeof fn === 'function' ? fn : null; },
             reload: () => installLocalBackend({ base, mode: requested, hooks: state.hooks }),
             _state: state,
         };

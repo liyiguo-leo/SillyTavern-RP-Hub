@@ -11,6 +11,8 @@
 import { installLocalBackend } from './local/fetch-shim.js';
 import { importToSt } from './panel/st-import.js';
 import { probeEnvironment, checkCoreScript } from './local/compat.js';
+import { mountDiagnostics, reportText } from './panel/diagnostics.js';
+import { EXTENSION_VERSION } from './local/constants.js';
 
 export const EXTENSION_URL = new URL('./', import.meta.url).href;
 
@@ -26,7 +28,14 @@ export async function init() {
         console.error('[rphub] 本地后端安装失败：', error);
     }
 
-    // ② 装载引擎 + 管道 + 面板（动态 import，失败可诊断）
+    // ② 诊断浮层（无控制台的宿主里是唯一的排障入口；必须先于引擎装载）
+    try {
+        mountDiagnostics({ version: EXTENSION_VERSION });
+    } catch (error) {
+        console.warn('[rphub] 诊断浮层挂载失败：', error);
+    }
+
+    // ③ 装载引擎 + 管道 + 面板（动态 import，失败可诊断）
     try {
         const boot = await import('./boot.js');
         await boot.start({ backendInfo, extensionUrl: EXTENSION_URL });
@@ -64,11 +73,13 @@ function reportBootFailure(error) {
     } catch { /* 忽略 */ }
 }
 
-// 控制台诊断入口（TT 真机排查用）
+// 控制台诊断入口（TT 真机排查用；无控制台时用页面右下角的「RP-Hub 诊断」浮层）
 try {
     window.__rphub__ = {
         extensionUrl: EXTENSION_URL,
+        version: EXTENSION_VERSION,
         compat: probeEnvironment,
         checkCoreScript,
+        report: () => reportText({ version: EXTENSION_VERSION }),
     };
 } catch { /* 忽略 */ }
