@@ -19,6 +19,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { patchPanelBundle } from './patch-panel.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
@@ -141,6 +142,13 @@ async function build(kind) {
 
     if (kind === 'tt') await patchForTT(outDir);
     await assertManifestValid(outDir);
+
+    // 面板产物做最小文案补丁（「判定：本地」→「识别通道：前端判定为 RP 卡」）
+    const panelFile = path.join(outDir, 'panel', 'rp-hub-panel.js');
+    if (await fs.stat(panelFile).then(() => true).catch(() => false)) {
+        const patched = await patchPanelBundle(panelFile);
+        if (patched.applied.length) console.log(`[build-variant]   · 面板文案补丁：${patched.applied.join('、')}`);
+    }
 
     const offenders = await findExternalImports(outDir);
     if (kind === 'tt' && offenders.length > 0) {

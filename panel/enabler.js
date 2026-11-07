@@ -369,7 +369,9 @@ async function autoPrepare(reason = 'event') {
     return out;
 }
 
-/** 绑定事件 + 启动时跑一次（延迟给宿主让路） */
+/** 绑定事件 + 启动时跑一次（延迟给宿主让路）；再按卡名变化兜底轮询 */
+let lastAutoCharName = null;
+
 function startAuto() {
     const run = () => { void autoPrepare('event').catch(() => { }); };
     try {
@@ -380,6 +382,21 @@ function startAuto() {
             }
         }
     } catch { /* 忽略 */ }
+
     setTimeout(run, 2000);
-    console.info('[rphub:panel] 自动化已启动（放行正则/落地世界书，可关）');
+
+    // 兜底：宿主的换卡事件名在不同版本可能不同 → 盯住当前卡名变化（开销极小，只在变化时动作）
+    try {
+        setInterval(() => {
+            try {
+                const { name } = resolveCurrentChar();
+                if (name && name !== lastAutoCharName) {
+                    lastAutoCharName = name;
+                    run();
+                }
+            } catch { /* 忽略 */ }
+        }, 4000);
+    } catch { /* 忽略 */ }
+
+    console.info('[rphub:panel] 自动化已启动（放行正则 / 落地世界书，可在诊断面板关闭）');
 }

@@ -7,7 +7,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "RP-Hub 兼容插件（合并版）",
-    "version": "0.4.8-unified.9",
+    "version": "0.4.9-unified.10",
     "homePage": "",
     "hooks": {
         "activate": "init"

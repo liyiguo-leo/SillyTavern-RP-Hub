@@ -137,7 +137,26 @@ node tools/store-test.mjs      # 17 项：卡库分表（元数据不拖卡体�
 - `panel/rp-hub-panel.js`：`node tools/fetch-panel.mjs`（`--ref <tag>` 或 `--from <本地文件>`）。
 - 长期建议改成 subtree/submodule + 构建期拼装，避免手工同步漏文件。
 
-## 6. 与酒馆内置「正则」的关系（重要）
+## 6. 自动化（正常使用不需要打开诊断面板）
+
+扩展在**启动 / 换卡 / 切聊天**时自动执行（幂等，只在真的做了动作时提示）：
+
+1. 只有本地库里 `formatDetail=rphub` 的卡才处理，普通卡完全不动；
+2. **自动放行**卡内 scoped 正则（写 `character_allowed_regex`）；
+3. **自动落地世界书**：把卡内 `character_book` 建成 `<卡名>'s Lorebook`，
+   并用 `rebindCharWorldbooks('current', { primary, additional })` 绑到当前角色。
+
+两个开关在诊断面板「自动化（免手动）」区块里，默认都开；关掉即退回手动。
+
+### 关于导入提示里的“判定：本地”
+
+RP助手 原始文案是 `RP 卡已上传：…（判定：本地）`，其中的“本地”指**判定通道**
+（前端本地启发式判定），不是“本地卡/普通卡”。合并版在构建时把它改成
+`识别通道：前端判定为 RP 卡`（`tools/patch-panel.mjs`，精确替换，命中数为 0 会构建失败）。
+
+诊断面板只是排障入口，可以不开；上面三步不依赖它。
+
+## 7. 与酒馆内置「正则」的关系（重要）
 
 本扩展的引擎是酒馆正则的替代实现，**两者不能同时跑**，否则同一份正则会被执行两次（双重替换）：
 
@@ -149,13 +168,13 @@ node tools/store-test.mjs      # 17 项：卡库分表（元数据不拖卡体�
 3. 全局正则（`extension_settings.regex`）无需放行；预设正则需 `preset_allowed_regex`（TT 版暂未提供入口）。
 4. 关掉内置正则后，卡导入时酒馆不再弹「是否允许此卡正则」，所以第 2 步要手动点一次。
 
-## 7. 已知边界
+## 8. 已知边界
 
 - 本地模式不实现 `/cards/{id}/st`（无 PNG 编码器）→ 明确 `501 LOCAL_NOT_IMPLEMENTED`。
 - IndexedDB 卡库与服务器库不互通；跨设备用 `exportLibrary()` / `importLibrary()`（`window.__rphub__` 未直接暴露，可在面板诊断或控制台调用 `local/store.js` 的导出函数）。
 - TT 变体的已知降级：无 `streamingProcessor` → 流式即时正则不生效；无 `getPresetManager` → 预设分组降级为安全空壳；`renderExtensionTemplateAsync` 返回空串（当前代码未使用）。
 
-## 8. 许可证
+## 9. 许可证
 
 各部件沿用上游：AGPL-3.0-or-later（RegexPlus / Backend），RP助手按其仓库 LICENSE；
 本仓新增的 `local/`、`panel/`、`variants/`、`tools/` 同 AGPL-3.0-or-later。
