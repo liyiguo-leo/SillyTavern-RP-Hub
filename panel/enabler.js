@@ -85,22 +85,44 @@ function installRpc() {
 
     const currentChar = () => {
         const c = ctx();
-        const ch = c?.characters?.[c.this_chid];
-        return { ctx: c, char: ch ?? null, avatar: ch?.avatar ?? null, name: ch?.name ?? null };
+        const th = (() => { try { return window.TavernHelper ?? null; } catch { return null; } })();
+
+        // TT/某些版本里 ctx.this_chid 为 null → 用酒馆助手的公开 API 兜底
+        let name = null;
+        try { name = th?.getCurrentCharacterName?.() ?? null; } catch { /* 忽略 */ }
+
+        let char = null;
+        if (Array.isArray(c?.characters)) {
+            if (name) char = c.characters.find((x) => x?.name === name) ?? null;
+            if (!char && c.this_chid !== null && c.this_chid !== undefined) char = c.characters[c.this_chid] ?? null;
+        }
+
+        let avatar = char?.avatar ?? null;
+        if (!avatar) {
+            try {
+                const path = th?.getCharAvatarPath?.('current');
+                if (typeof path === 'string' && path) avatar = decodeURIComponent(path.split('/').pop() || '') || null;
+            } catch { /* 忽略 */ }
+        }
+
+        return { ctx: c, char, avatar, name: name ?? char?.name ?? null };
     };
 
     const handlers = {
         'regex-state': () => {
             const { ctx: c, avatar, name, char } = currentChar();
             const list = c?.extensionSettings?.character_allowed_regex;
+            const th = (() => { try { return window.TavernHelper ?? null; } catch { return null; } })();
             return {
                 hasContext: !!c,
-                hasCharacter: !!char,
+                hasCharacter: !!char || !!avatar,
                 avatar,
                 name,
                 allowed: Array.isArray(list) && avatar ? list.includes(avatar) : null,
                 characterCount: Array.isArray(c?.characters) ? c.characters.length : null,
                 thisChid: c?.this_chid ?? null,
+                hasTavernHelper: !!th,
+                resolvedVia: char ? 'characters' : (avatar ? 'tavern-helper' : 'none'),
             };
         },
         'regex-set': ({ allow } = {}) => {

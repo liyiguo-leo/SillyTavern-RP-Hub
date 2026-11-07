@@ -184,15 +184,19 @@ function renderPanel(panel, extra) {
       </div>
 
       <div style="font-size:11px;background:#f2f6ff;border:1px solid #ccd9f2;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all">
-        <b>当前卡</b>：${esc(state?.name ?? '未知')}${state?.avatar ? `<br><span style="opacity:.7">${esc(state.avatar)}</span>` : ''}<br>
+        <b>当前卡</b>：${esc(state?.name ?? '未知')}${state?.avatar ? `<br><span style="opacity:.7">${esc(state.avatar)}</span>` : ''}
+        ${state ? `<br><span style="opacity:.7">解析途径：${esc(state.resolvedVia || '?')} · 角色数：${esc(state.characterCount ?? '?')} · 酒馆助手：${state.hasTavernHelper ? '✓' : '✗'}</span>` : ''}<br>
         <b>正则引擎模式</b>：<span data-role="mode">${esc(modeInfo?.text ?? '查询中…')}</span><br>
         <b>卡内正则（scoped）</b>：<b style="color:${allowedColor}">${esc(allowedText)}</b>
         <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">
           <button data-act="allow" style="font-size:11px;padding:1px 8px">允许</button>
           <button data-act="deny" style="font-size:11px;padding:1px 8px">撤销</button>
+          ${modeInfo?.cardId ? '<button data-act="inspect" style="font-size:11px;padding:1px 8px">卡面体检</button>' : ''}
+          ${modeInfo?.marked ? '<button data-act="unmark" style="font-size:11px;padding:1px 8px">取消标记</button>' : ''}
           ${modeInfo?.notInLibrary ? '<button data-act="mark-rp" style="font-size:11px;padding:1px 8px">手动标记为 RP</button>' : ''}
         </div>
         <div style="opacity:.72;margin-top:4px">只能有一个正则引擎：请关闭酒馆内置「正则」扩展后，再在这里放行本卡。</div>
+        <div data-role="inspect" style="margin-top:4px"></div>
       </div>
 
       <div style="font-size:11px;margin-bottom:6px;word-break:break-all">
@@ -281,6 +285,54 @@ function renderPanel(panel, extra) {
             }
         });
     }
+
+    // 卡面体检：把本地库真正存下来的东西摊开（回答「为什么识别成普通卡 / 为什么没有模板」）
+    const inspectBtn = panel.querySelector('[data-act="inspect"]');
+    if (inspectBtn) {
+        inspectBtn.addEventListener('click', async () => {
+            const be = backend();
+            const cardId = modeInfo?.cardId;
+            const box = panel.querySelector('[data-role="inspect"]');
+            if (!be?.base || !cardId || !box) return;
+            box.textContent = '体检中…';
+            try {
+                const res = await fetch(`${be.base}/cards/${cardId}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                const data = await res.json();
+                const extKeys = Object.keys(data.character?.extensions || {});
+                const rpKeys = extKeys.filter((k) => k.startsWith('rp_hub') || k === 'ui_templates' || k === 'rp_hub_watermark');
+                const ui = data.variables?.uiTemplates?.length ?? 0;
+                const runtime = data.variables?.runtimeByCharacter != null;
+                box.innerHTML = `<div style="background:#fff;border:1px dashed #bbb;border-radius:6px;padding:6px;margin-top:4px">
+                  formatDetail=<b>${esc(data.formatDetail)}</b><br>
+                  regex=${(data.regex || []).length} · lorebook=${(data.lorebook || []).length} · uiTemplates=<b>${ui}</b> · runtimeByCharacter=${runtime ? '有' : '无'}<br>
+                  extensions：${extKeys.length ? esc(extKeys.slice(0, 10).join(', ')) : '（无）'}<br>
+                  RP-Hub 特征字段：${rpKeys.length ? esc(rpKeys.join(', ')) : '（无 → 上游会判为普通 ST 卡）'}
+                </div>`;
+            } catch (e) {
+                box.textContent = `体检失败：${e?.message || e}`;
+            }
+        });
+    }
+
+    // 取消标记
+    const unmarkBtn = panel.querySelector('[data-act="unmark"]');
+    if (unmarkBtn) {
+        unmarkBtn.addEventListener('click', async () => {
+            const be = backend();
+            const hash = modeInfo?.contentHash;
+            if (!be?.base || !hash) { toast('缺少 contentHash，无法取消标记'); return; }
+            try {
+                const res = await fetch(`${be.base}/marks/${hash}`, { method: 'DELETE' });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                try { window.__rphub__?.clearModeCache?.(); } catch { /* 忽略 */ }
+                toast('已取消 RP 标记');
+                await refresh(panel, extra);
+            } catch (e) {
+                toast(`取消标记失败：${e?.message || e}`);
+            }
+        });
+    }
 }
 
 /** 查当前卡在本地库里的语义模式 */
@@ -300,7 +352,12 @@ async function lookupMode(be) {
         }
         if (!res.ok) return { text: `HTTP ${res.status}` };
         const data = await res.json();
-        return { text: `${data.formatDetail}${data.marked ? '（手动标记）' : ''}` };
+        return {
+            text: `${data.formatDetail}${data.marked ? '（手动标记）' : ''}`,
+            cardId: data.cardId ?? null,
+            contentHash: data.contentHash ?? null,
+            marked: !!data.marked,
+        };
     } catch {
         return { text: '查询失败' };
     }

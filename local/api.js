@@ -168,6 +168,8 @@ export async function handleRequest(req) {
                 contentHash,
                 regexCount: normalized.regex.length,
                 lorebookCount: normalized.lorebook.length,
+                uiTemplateCount: Array.isArray(normalized.variables?.uiTemplates) ? normalized.variables.uiTemplates.length : 0,
+                hasRuntimeByCharacter: normalized.variables?.runtimeByCharacter != null,
                 schema_version: SCHEMA_VERSION,
             };
             const cardPayload = {
@@ -285,6 +287,8 @@ export async function handleRequest(req) {
                     importedAt: meta.importedAt ?? null,
                     regexCount: meta.regexCount ?? 0,
                     lorebookCount: meta.lorebookCount ?? 0,
+                    uiTemplateCount: meta.uiTemplateCount ?? null,
+                    hasRuntimeByCharacter: meta.hasRuntimeByCharacter ?? null,
                     contentHash: meta.contentHash ?? null,
                 }))
                 .sort((a, b) => String(b.importedAt || '').localeCompare(String(a.importedAt || '')));
