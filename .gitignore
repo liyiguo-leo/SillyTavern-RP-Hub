@@ -1,0 +1,14 @@
+# 运行时产物
+server/data/
+node_modules/
+*.log
+
+# 面板产物来自上游 dist（可用 tools/fetch-panel.mjs 重新取回）
+# 若希望仓库自带可装包，就不要忽略下面这行。
+# panel/rp-hub-panel.js
+
+# 上游镜像/克隆（开发用）
+../_ref/
+# 构建产物（tools/build-variant.mjs 生成）
+dist/
+
