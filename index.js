@@ -17,6 +17,34 @@ import { EXTENSION_VERSION } from './local/constants.js';
 
 export const EXTENSION_URL = new URL('./', import.meta.url).href;
 
+/** 本扩展在酒馆里的内部名（third-party/<folder>），用于 A/B 排查时临时禁用自己 */
+export const EXTENSION_NAME = (() => {
+    try {
+        const parts = new URL(EXTENSION_URL).pathname.split('/').filter(Boolean); // scripts/extensions/third-party/<folder>
+        const folder = parts[parts.length - 1];
+        return folder ? `third-party/${decodeURIComponent(folder)}` : null;
+    } catch {
+        return null;
+    }
+})();
+
+/** 临时禁用本扩展并刷新（排查「是不是本扩展导致」的最快办法） */
+function disableSelfAndReload() {
+    try {
+        const ctx = SillyTavern.getContext();
+        const list = ctx.extensionSettings.disabledExtensions || [];
+        if (EXTENSION_NAME && !list.includes(EXTENSION_NAME)) list.push(EXTENSION_NAME);
+        ctx.extensionSettings.disabledExtensions = list;
+        ctx.saveSettingsDebounced?.();
+        console.info(`[rphub] 已把 ${EXTENSION_NAME} 加入 disabledExtensions，即将刷新`);
+        setTimeout(() => location.reload(), 300);
+        return true;
+    } catch (e) {
+        console.warn('[rphub] 自禁用失败：', e);
+        return false;
+    }
+}
+
 /**
  * 扩展激活入口（manifest.json 的 hooks.activate）。
  */
@@ -99,5 +127,8 @@ try {
         cardBridge: () => window.__rphubCardBridge ?? null,
         /** 打开诊断面板（等同魔术棒菜单里的「RP-Hub 诊断」） */
         openDiagnostics: () => window.__rphubOpenDiagnostics?.(),
+        /** A/B 排查：临时禁用本扩展并刷新（在扩展管理里重新启用即可恢复） */
+        disableSelf: () => disableSelfAndReload(),
+        extensionName: EXTENSION_NAME,
     };
 } catch { /* 忽略 */ }

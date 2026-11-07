@@ -499,6 +499,7 @@ function renderPanel(panel, extra) {
           <button data-act="card-scripts" style="font-size:11px;padding:1px 8px">抓卡内脚本</button>
           <button data-act="trace-msg" style="font-size:11px;padding:1px 8px">追踪 iframe 消息</button>
           <button data-act="test-input" style="font-size:11px;padding:1px 8px">测试写入</button>
+          <button data-act="ab-test" style="font-size:11px;padding:1px 8px">暂停本扩展并刷新</button>
         </div>
         <div data-role="scripts" style="margin-top:4px;max-height:190px;overflow:auto"></div>
       </div>
@@ -690,6 +691,15 @@ function renderPanel(panel, extra) {
             if (res?.error) toast(`自动处理失败：${res.error}`);
             else if (last?.actions?.length) toast(`已自动处理：${last.actions.join(' / ')}`);
             else toast(last?.skipped ? `无需处理（${last.skipped}）` : '自动处理完成，无动作');
+        });
+    }
+
+    // A/B 排查：临时禁用本扩展并刷新，用来看「问题是不是本扩展引起的」
+    const abBtn = panel.querySelector('[data-act="ab-test"]');
+    if (abBtn) {
+        abBtn.addEventListener('click', () => {
+            const ok = window.__rphub__?.disableSelf?.();
+            toast(ok ? '已暂停本扩展，刷新后重新点卡内选项；恢复：扩展管理里重新启用' : '暂停失败：没有拿到酒馆设置上下文');
         });
     }
 
