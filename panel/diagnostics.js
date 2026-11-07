@@ -16,6 +16,7 @@ let forwardedFailure = null;
 let lastState = null;      // 来自 iframe 的 regex-state
 let lastCards = null;      // GET /cards 结果
 let modeInfo = null;       // { text, notInLibrary }
+let autoState = null;      // { config, last } 来自 iframe 的 auto-get
 
 const pendingRpc = new Map();
 
@@ -29,6 +30,18 @@ function esc(value) {
 
 function backend() {
     try { return window.__rphubLocalBackend__ ?? null; } catch { return null; }
+}
+
+/** 「上次自动处理」的人话摘要 */
+function autoText(last) {
+    if (!last) return '尚未执行';
+    const bits = [];
+    if (last.mode) bits.push(`模式=${last.mode}`);
+    if (Array.isArray(last.actions) && last.actions.length) bits.push(last.actions.join(' + '));
+    else if (last.skipped) bits.push(`跳过：${last.skipped}`);
+    if (last.error) bits.push(`错误：${last.error}`);
+    if (last.worldbookError) bits.push(`世界书失败：${last.worldbookError}`);
+    return `上次：${bits.join(' · ') || '无动作'}`;
 }
 
 function toast(message) {
@@ -183,6 +196,18 @@ function renderPanel(panel, extra) {
         宿主：ST=${report.host.hasSillyTavern ? '✓' : '✗'} · 酒馆助手=${report.host.hasTavernHelper ? '✓' : '✗'} · TT调试API=${report.host.hasTauriTavernDev ? '✓' : '✗'}
       </div>
 
+      <div style="font-size:11px;background:#f7f4ff;border:1px solid #d9d2f0;border-radius:6px;padding:6px;margin-bottom:6px">
+        <b>自动化（免手动）</b>
+        <div style="margin-top:3px;display:flex;flex-direction:column;gap:2px">
+          <label><input type="checkbox" data-auto="regex" ${autoState?.config?.regex !== false ? 'checked' : ''}> 自动放行卡内正则（scoped）</label>
+          <label><input type="checkbox" data-auto="worldbook" ${autoState?.config?.worldbook !== false ? 'checked' : ''}> 自动落地并绑定卡内世界书</label>
+        </div>
+        <div style="margin-top:4px;display:flex;gap:6px;align-items:center">
+          <button data-act="auto-run" style="font-size:11px;padding:1px 8px">立即执行一次</button>
+          <span style="opacity:.72">${esc(autoText(autoState?.last))}</span>
+        </div>
+      </div>
+
       <div style="font-size:11px;background:#f2f6ff;border:1px solid #ccd9f2;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all">
         <b>当前卡</b>：${esc(state?.name ?? '未知')}${state?.avatar ? `<br><span style="opacity:.7">${esc(state.avatar)}</span>` : ''}
         ${state ? `<br><span style="opacity:.7">解析途径：${esc(state.resolvedVia || '?')} · 角色数：${esc(state.characterCount ?? '?')} · 酒馆助手：${state.hasTavernHelper ? '✓' : '✗'}</span>` : ''}<br>
@@ -311,6 +336,17 @@ function renderPanel(panel, extra) {
                   extensions：${extKeys.length ? esc(extKeys.slice(0, 10).join(', ')) : '（无）'}<br>
                   RP-Hub 特征字段：${rpKeys.length ? esc(rpKeys.join(', ')) : '（无 → 上游会判为普通 ST 卡）'}
                 </div>`;
+
+                // 世界书现状：存在哪些书、当前卡绑的是哪本（RP助手 注入依赖 primary）
+                const wb = await rpc('worldbooks');
+                if (wb?.result) {
+                    const names = Array.isArray(wb.result.names) ? wb.result.names : [];
+                    const bound = wb.result.bound || null;
+                    box.insertAdjacentHTML('beforeend', `<div style="background:#fff;border:1px dashed #bbb;border-radius:6px;padding:6px;margin-top:4px">
+                      世界书：${names.length} 本${names.length ? `<br><span style="opacity:.75">${esc(names.slice(0, 6).join(' · '))}${names.length > 6 ? ' …' : ''}</span>` : ''}<br>
+                      当前卡绑定：primary=<b>${esc(bound?.primary ?? '（无）')}</b> · additional=${(bound?.additional || []).length}
+                    </div>`);
+                }
             } catch (e) {
                 box.textContent = `体检失败：${e?.message || e}`;
             }
@@ -333,6 +369,28 @@ function renderPanel(panel, extra) {
             } catch (e) {
                 toast(`取消标记失败：${e?.message || e}`);
             }
+        });
+    }
+
+    // 自动化开关 + 立即执行
+    panel.querySelectorAll('input[data-auto]').forEach((el) => {
+        el.addEventListener('change', async () => {
+            const patch = {};
+            patch[el.dataset.auto] = el.checked;
+            const res = await rpc('auto-set', patch, 25000);
+            if (res?.result?.config) autoState = res.result;
+            await refresh(panel, extra);
+        });
+    });
+    const autoRunBtn = panel.querySelector('[data-act="auto-run"]');
+    if (autoRunBtn) {
+        autoRunBtn.addEventListener('click', async () => {
+            const res = await rpc('auto-run', {}, 30000);
+            await refresh(panel, extra);
+            const last = res?.result;
+            if (res?.error) toast(`自动处理失败：${res.error}`);
+            else if (last?.actions?.length) toast(`已自动处理：${last.actions.join(' / ')}`);
+            else toast(last?.skipped ? `无需处理（${last.skipped}）` : '自动处理完成，无动作');
         });
     }
 
@@ -407,7 +465,7 @@ async function lookupMode(be) {
 /** 拉取 iframe 状态 + 卡库 + 当前卡模式，然后一次性重绘 */
 async function refresh(panel, extra) {
     const be = backend();
-    const [stateRes, cardsRes] = await Promise.all([
+    const [stateRes, cardsRes, autoRes] = await Promise.all([
         rpc('regex-state'),
         (async () => {
             if (!be?.base) return null;
@@ -416,9 +474,11 @@ async function refresh(panel, extra) {
                 return res.ok ? await res.json() : null;
             } catch { return null; }
         })(),
+        rpc('auto-get'),
     ]);
     if (stateRes?.result) lastState = stateRes.result;
     if (cardsRes) lastCards = cardsRes;
+    if (autoRes?.result) autoState = autoRes.result;
 
     modeInfo = await lookupMode(be);
     renderPanel(panel, extra);

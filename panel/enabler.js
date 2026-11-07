@@ -51,6 +51,12 @@ async function main() {
         console.warn('[rphub:panel] RPC 安装失败：', e);
     }
 
+    try {
+        startAuto();
+    } catch (e) {
+        console.warn('[rphub:panel] 自动化启动失败：', e);
+    }
+
     if (!await panelBundleExists()) {
         console.info(`[rphub:panel] 未找到面板产物 ${PANEL_BUNDLE}。`
             + '把 RP助手 的构建产物放到 panel/rp-hub-panel.js（或跑 node tools/fetch-panel.mjs）即可启用面板。');
@@ -79,34 +85,8 @@ void main();
 // 都由本 iframe 执行，页面只负责显示。
 
 function installRpc() {
-    const ctx = () => {
-        try { return SillyTavern.getContext(); } catch { return null; }
-    };
-
-    const currentChar = () => {
-        const c = ctx();
-        const th = (() => { try { return window.TavernHelper ?? null; } catch { return null; } })();
-
-        // TT/某些版本里 ctx.this_chid 为 null → 用酒馆助手的公开 API 兜底
-        let name = null;
-        try { name = th?.getCurrentCharacterName?.() ?? null; } catch { /* 忽略 */ }
-
-        let char = null;
-        if (Array.isArray(c?.characters)) {
-            if (name) char = c.characters.find((x) => x?.name === name) ?? null;
-            if (!char && c.this_chid !== null && c.this_chid !== undefined) char = c.characters[c.this_chid] ?? null;
-        }
-
-        let avatar = char?.avatar ?? null;
-        if (!avatar) {
-            try {
-                const path = th?.getCharAvatarPath?.('current');
-                if (typeof path === 'string' && path) avatar = decodeURIComponent(path.split('/').pop() || '') || null;
-            } catch { /* 忽略 */ }
-        }
-
-        return { ctx: c, char, avatar, name: name ?? char?.name ?? null };
-    };
+    const ctx = stCtx;
+    const currentChar = resolveCurrentChar;
 
     const handlers = {
         'regex-state': () => {
@@ -156,41 +136,7 @@ function installRpc() {
             if (list.length === 0) return { ok: false, reason: '没有可导入的条目' };
 
             // 转成酒馆 world info JSON（交给 importRawWorldbook，避免自己猜 TH 的结构化字段）
-            const stEntries = {};
-            list.forEach((entry, index) => {
-                stEntries[String(index)] = {
-                    uid: index,
-                    key: Array.isArray(entry.keys) ? entry.keys : [],
-                    keysecondary: [],
-                    comment: entry.name || entry.comment || `Entry ${index}`,
-                    content: entry.content || '',
-                    constant: !!entry.constant,
-                    selective: !!entry.selective,
-                    selectiveLogic: 0,
-                    addMemo: true,
-                    order: 100,
-                    position: typeof entry.position === 'number' ? entry.position : 4,
-                    disable: !!entry.disable,
-                    excludeRecursion: !!entry.excludeRecursion,
-                    preventRecursion: false,
-                    delayUntilRecursion: false,
-                    probability: typeof entry.probability === 'number' ? entry.probability : 100,
-                    useProbability: true,
-                    depth: typeof entry.depth === 'number' ? entry.depth : 4,
-                    group: '',
-                    scanDepth: null,
-                    caseSensitive: null,
-                    matchWholeWords: null,
-                    useGroupScoring: null,
-                    automationId: '',
-                    role: 0,
-                    vectorized: false,
-                    sticky: 0,
-                    cooldown: 0,
-                    delay: 0,
-                };
-            });
-            const json = JSON.stringify({ entries: stEntries }, null, 2);
+            const json = toStWorldbookJson(list);
 
             const result = { ok: true, name: bookName, entries: list.length, imported: false, bound: false };
             try {
@@ -217,6 +163,21 @@ function installRpc() {
             }
             return result;
         },
+
+        /* ---- 自动化（免手动） ---- */
+        'auto-get': () => ({ config: readAutoConfig(), last: globalThis.__rphubAutoLast ?? null }),
+        'auto-set': async (patch = {}) => {
+            const next = { ...readAutoConfig(), ...(patch && typeof patch === 'object' ? patch : {}) };
+            writeAutoConfig(next);
+            const run = await autoPrepare('config');
+            return { config: next, last: run };
+        },
+        'auto-run': () => autoPrepare('manual'),
+        'worldbooks': () => {
+            const names = (() => { try { return getWorldbookNames(); } catch { return []; } })();
+            const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
+            return { names, bound, charName: currentChar().name };
+        },
     };
 
     window.addEventListener('message', async (event) => {
@@ -237,4 +198,188 @@ function installRpc() {
     });
 
     console.info('[rphub:panel] 诊断 RPC 已就绪（regex-state / regex-set / cards）。');
+}
+
+/* ---------------- 模块级：上下文 / 当前卡 ---------------- */
+
+function stCtx() {
+    try { return SillyTavern.getContext(); } catch { return null; }
+}
+
+function resolveCurrentChar() {
+    const c = stCtx();
+    const th = (() => { try { return window.TavernHelper ?? null; } catch { return null; } })();
+
+    // TT/某些版本里 ctx.this_chid 为 null → 用酒馆助手的公开 API 兜底
+    let name = null;
+    try { name = th?.getCurrentCharacterName?.() ?? null; } catch { /* 忽略 */ }
+
+    let char = null;
+    if (Array.isArray(c?.characters)) {
+        if (name) char = c.characters.find((x) => x?.name === name) ?? null;
+        if (!char && c.this_chid !== null && c.this_chid !== undefined) char = c.characters[c.this_chid] ?? null;
+    }
+
+    let avatar = char?.avatar ?? null;
+    if (!avatar) {
+        try {
+            const path = th?.getCharAvatarPath?.('current');
+            if (typeof path === 'string' && path) avatar = decodeURIComponent(path.split('/').pop() || '') || null;
+        } catch { /* 忽略 */ }
+    }
+
+    return { ctx: c, char, avatar, name: name ?? char?.name ?? null };
+}
+
+/* ---------------- 自动化：免手动放行 + 免手动建世界书 ---------------- */
+
+const AUTO_KEY = 'rphub:auto';
+
+function readAutoConfig() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(AUTO_KEY) || '{}');
+        return { regex: true, worldbook: true, ...(raw && typeof raw === 'object' ? raw : {}) };
+    } catch {
+        return { regex: true, worldbook: true };
+    }
+}
+
+function writeAutoConfig(config) {
+    try { localStorage.setItem(AUTO_KEY, JSON.stringify(config)); } catch { /* 忽略 */ }
+}
+
+/** 归一化条目 → 酒馆 world info JSON 文本 */
+function toStWorldbookJson(list) {
+    const stEntries = {};
+    list.forEach((entry, index) => {
+        stEntries[String(index)] = {
+            uid: index,
+            key: Array.isArray(entry.keys) ? entry.keys : [],
+            keysecondary: [],
+            comment: entry.name || entry.comment || `Entry ${index}`,
+            content: entry.content || '',
+            constant: !!entry.constant,
+            selective: !!entry.selective,
+            selectiveLogic: 0,
+            addMemo: true,
+            order: 100,
+            position: typeof entry.position === 'number' ? entry.position : 4,
+            disable: !!entry.disable,
+            excludeRecursion: !!entry.excludeRecursion,
+            preventRecursion: false,
+            delayUntilRecursion: false,
+            probability: typeof entry.probability === 'number' ? entry.probability : 100,
+            useProbability: true,
+            depth: typeof entry.depth === 'number' ? entry.depth : 4,
+            group: '',
+            scanDepth: null,
+            caseSensitive: null,
+            matchWholeWords: null,
+            useGroupScoring: null,
+            automationId: '',
+            role: 0,
+            vectorized: false,
+            sticky: 0,
+            cooldown: 0,
+            delay: 0,
+        };
+    });
+    return JSON.stringify({ entries: stEntries }, null, 2);
+}
+
+/**
+ * 自动准备当前卡：放行 scoped 正则 + 把卡内世界书落地并绑定。
+ * 幂等；只在真正做了动作时提示。
+ * @param {'event'|'manual'|'config'} reason
+ */
+async function autoPrepare(reason = 'event') {
+    const config = readAutoConfig();
+    const be = getLocalBackend();
+    const { name, avatar, ctx } = resolveCurrentChar();
+    const out = { at: new Date().toISOString(), reason, name, actions: [], mode: null, cardId: null };
+
+    if (!be?.base) { out.skipped = 'no-backend'; globalThis.__rphubAutoLast = out; return out; }
+    if (!name) { out.skipped = 'no-character'; globalThis.__rphubAutoLast = out; return out; }
+
+    try {
+        const res = await fetch(`${be.base}/cards/by-name/${encodeURIComponent(name)}`);
+        if (!res.ok) { out.skipped = 'not-in-library'; globalThis.__rphubAutoLast = out; return out; }
+        const info = await res.json();
+        out.mode = info.formatDetail ?? null;
+        out.cardId = info.cardId ?? null;
+        if (info.formatDetail !== 'rphub') { out.skipped = 'not-rphub'; globalThis.__rphubAutoLast = out; return out; }
+
+        // ① 放行卡内 scoped 正则
+        if (config.regex && avatar) {
+            const c = ctx ?? stCtx();
+            const list = c?.extensionSettings?.character_allowed_regex;
+            if (!Array.isArray(list) || !list.includes(avatar)) {
+                c.extensionSettings = c.extensionSettings || {};
+                c.extensionSettings.character_allowed_regex = Array.isArray(list) ? list : [];
+                c.extensionSettings.character_allowed_regex.push(avatar);
+                try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
+                out.actions.push('allow-regex');
+            }
+        }
+
+        // ② 卡内世界书落地 + 绑定（RP助手 注入依赖角色 primary 世界书）
+        if (config.worldbook) {
+            const lr = await fetch(`${be.base}/cards/${encodeURIComponent(info.cardId)}/lorebook`)
+                .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+            const entries = Array.isArray(lr?.lorebook) ? lr.lorebook : [];
+            if (entries.length > 0) {
+                const names = (() => { try { return getWorldbookNames(); } catch { return []; } })();
+                const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
+                const primary = bound?.primary || null;
+                const target = (primary && names.includes(primary)) ? primary : `${name}'s Lorebook`;
+                out.worldbook = target;
+
+                if (!names.includes(target)) {
+                    try {
+                        await importRawWorldbook(target, toStWorldbookJson(entries));
+                        out.actions.push('create-worldbook');
+                    } catch (e) {
+                        out.worldbookError = e?.message || String(e);
+                    }
+                }
+                try {
+                    await rebindCharWorldbooks('current', {
+                        primary: target,
+                        additional: Array.isArray(bound?.additional) ? bound.additional : [],
+                    });
+                    if (bound?.primary !== target) out.actions.push('bind-worldbook');
+                } catch (e) {
+                    out.bindError = e?.message || String(e);
+                }
+            }
+        }
+    } catch (e) {
+        out.error = e?.message || String(e);
+    }
+
+    globalThis.__rphubAutoLast = out;
+    if (out.actions.length > 0) {
+        try {
+            if (typeof toastr !== 'undefined') {
+                toastr.success(`RP-Hub 自动处理：${out.actions.join(' / ')}`, 'RP-Hub', { timeOut: 6000 });
+            }
+        } catch { /* 忽略 */ }
+        console.info('[rphub:panel] 自动处理完成：', out);
+    }
+    return out;
+}
+
+/** 绑定事件 + 启动时跑一次（延迟给宿主让路） */
+function startAuto() {
+    const run = () => { void autoPrepare('event').catch(() => { }); };
+    try {
+        if (typeof eventOn === 'function') {
+            const et = (typeof tavern_events === 'object' && tavern_events) ? tavern_events : {};
+            for (const evt of [et.CHAT_CHANGED, et.CHARACTER_CHANGED, et.APP_READY].filter(Boolean)) {
+                try { eventOn(evt, run); } catch { /* 单个失败忽略 */ }
+            }
+        }
+    } catch { /* 忽略 */ }
+    setTimeout(run, 2000);
+    console.info('[rphub:panel] 自动化已启动（放行正则/落地世界书，可关）');
 }
