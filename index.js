@@ -97,5 +97,7 @@ try {
         traceIframeMessages: (on = true) => traceIframeMessages(on),
         /** 卡内消息桥（把 iframe 发来的"写入文本"落到输入框）；默认开 */
         cardBridge: () => window.__rphubCardBridge ?? null,
+        /** 打开诊断面板（等同魔术棒菜单里的「RP-Hub 诊断」） */
+        openDiagnostics: () => window.__rphubOpenDiagnostics?.(),
     };
 } catch { /* 忽略 */ }

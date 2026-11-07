@@ -254,6 +254,64 @@ export function traceIframeMessages(enable = true) {
     return window[KEY];
 }
 
+/**
+ * 把诊断入口挂进「魔术棒」菜单（#extensionsMenu）。
+ * 做法与酒馆里其它扩展一致：clone 一个 .extension_container 模板再改字/绑事件，
+ * 不依赖任何内部 API。菜单节点可能晚于扩展加载出现，所以带轮询重试。
+ * @param {() => void} onClick
+ */
+export function installMenuEntry(onClick) {
+    const ITEM_ID = 'rphub-diagnostics-menu-item';
+    let attempts = 0;
+
+    const tryInstall = () => {
+        if (document.getElementById(ITEM_ID)) return true;
+        const menu = document.getElementById('extensionsMenu');
+        if (!menu) return false;
+        const template = menu.querySelector('.extension_container');
+        // 菜单可能是空的（没有其它扩展项）→ 自己造一个同结构的节点
+        const node = template
+            ? template.cloneNode(true)
+            : (() => {
+                const el = document.createElement('div');
+                el.className = 'extension_container';
+                el.innerHTML = '<div class="extension_icon">🩺</div><div class="extension_name">RP-Hub 诊断</div>';
+                return el;
+            })();
+        node.id = ITEM_ID;
+        node.dataset.rphub = '1';
+        const nameEl = node.querySelector('.extension_name');
+        if (nameEl) nameEl.textContent = 'RP-Hub 诊断';
+        const iconEl = node.querySelector('.extension_icon');
+        if (iconEl) iconEl.textContent = '🩺';
+
+        node.addEventListener('click', (event) => {
+            event.stopPropagation();
+            try {
+                // 关掉魔术棒菜单（各版本实现不同，逐个兜底）
+                const $ = window.jQuery;
+                if ($) { $('#extensionsMenu').hide(); $('#extensionsMenu').removeClass('open'); }
+                menu.style.display = 'none';
+            } catch { /* 忽略 */ }
+            onClick();
+        });
+
+        menu.appendChild(node);
+        console.info('[rphub] 诊断入口已加入魔术棒菜单');
+        return true;
+    };
+
+    if (tryInstall()) return;
+
+    const timer = setInterval(() => {
+        attempts += 1;
+        if (tryInstall() || attempts > 40) {
+            clearInterval(timer);
+            if (attempts > 40) console.warn('[rphub] 没找到 #extensionsMenu，保留左上角连点 3 次作为入口');
+        }
+    }, 500);
+}
+
 /** 汇总诊断（复制/报告用） */export function collectReport(extra = {}) {
     const be = backend();
     const recent = typeof be?.recent === 'function' ? be.recent() : [];
@@ -802,6 +860,15 @@ export function mountDiagnostics(extra = {}) {
 
     document.body.appendChild(btn);
     document.body.appendChild(panel);
+
+    // 主入口：魔术棒菜单项（安卓上没有控制台，这个最好点）
+    const openPanel = () => {
+        btn.style.display = '';
+        panel.style.display = 'block';
+        void refresh(panel, extra);
+    };
+    try { installMenuEntry(openPanel); } catch (e) { console.warn('[rphub] 魔术棒入口注册失败：', e); }
+    window.__rphubOpenDiagnostics = openPanel;
 
     // 安卓端没有控制台：左上角连点 3 次即可呼出面板
     try {
