@@ -70,9 +70,12 @@ function decodeName(raw) {
 
 function toBytes(input) {
     if (!input) return new Uint8Array(0);
-    if (input instanceof Uint8Array) return input;
-    if (input instanceof ArrayBuffer) return new Uint8Array(input);
+    // 跨 realm 安全：ArrayBuffer.isView 依赖内部槽；ArrayBuffer 用品牌标记判断
     if (ArrayBuffer.isView(input)) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+    if (Object.prototype.toString.call(input) === '[object ArrayBuffer]'
+        || Object.prototype.toString.call(input) === '[object SharedArrayBuffer]') {
+        return new Uint8Array(input);
+    }
     return new Uint8Array(0);
 }
 

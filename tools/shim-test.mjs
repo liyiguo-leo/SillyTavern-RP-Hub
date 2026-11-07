@@ -8,6 +8,7 @@
 // 运行：node tools/shim-test.mjs
 
 import { buildPng, rpCardJson } from './fixtures.mjs';
+import vm from 'node:vm';
 
 globalThis.window = globalThis;
 globalThis.location = new URL('http://127.0.0.1:8000/');
@@ -85,6 +86,29 @@ console.log('\n[3] 非 base 请求 → 原样透传');
     const before = passthrough.length;
     await fetch('/api/characters/import');
     ok(passthrough.length === before + 1, '透传到真实 fetch', passthrough.at(-1));
+}
+
+console.log('\n[4] 跨 realm body —— TT 真机 422 EMPTY_BODY 的复现与修复');
+{
+    const { toBytes, toBytesAsync } = await import('../local/fetch-shim.js');
+    const cardBytes = new TextEncoder().encode(JSON.stringify(rpCardJson()));
+    // 在另一个 vm context 里造 ArrayBuffer：构造器不同 → instanceof 判断会失效
+    const foreign = vm.runInNewContext(`new ArrayBuffer(${cardBytes.length})`);
+    new Uint8Array(foreign).set(cardBytes);
+
+    ok(foreign instanceof ArrayBuffer === false, '确认为「异 realm」ArrayBuffer（instanceof 为 false）');
+    ok(toBytes(foreign)?.length === cardBytes.length, 'toBytes 跨 realm 仍取到字节', String(toBytes(foreign)?.length));
+    ok((await toBytesAsync(foreign))?.length === cardBytes.length, 'toBytesAsync 跨 realm 同样可用');
+
+    const res = await fetch(`${BASE}/cards/upload?writeBack=0`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream', 'x-filename': 'foreign-realm.json' },
+        body: foreign,
+    });
+    const data = await res.json();
+    ok(res.status === 200 && /^c[0-9a-f]{16}$/.test(data.cardId || ''),
+        '跨 realm body 的 upload 成功（不再是 EMPTY_BODY）',
+        `${res.status} ${data.cardId || data.error?.code}`);
 }
 
 await realFetch.call; // 保持 realFetch 引用（Lint 无意义引用消除）

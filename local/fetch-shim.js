@@ -32,20 +32,37 @@ export function defaultBase() {
     }
 }
 
-function toBytes(body) {
+/* ---------------- body 归一（跨 realm 安全） ---------------- */
+//
+// 踩坑记录：导入拦截监听父窗口的 drop 事件，dataTransfer.files 是**父 realm** 的对象，
+// file.arrayBuffer() 产出的 ArrayBuffer 也属于父 realm；而本 shim 跑在酒馆助手的 iframe
+// realm 里 —— 那里 `x instanceof ArrayBuffer` 为 false（构造器不是同一个）。
+// 于是请求体被转换丢掉 → EMPTY_BODY 422。判断改为「按内部槽/品牌标记」，跨 realm 也成立。
+
+const TAG = (value) => Object.prototype.toString.call(value);
+
+/** 是否 ArrayBuffer（含跨 realm / SharedArrayBuffer 视图之外的原始缓冲） */
+export function isArrayBufferLike(value) {
+    return TAG(value) === '[object ArrayBuffer]' || TAG(value) === '[object SharedArrayBuffer]';
+}
+
+/** 是否 Blob/File（跨 realm 也用品牌标记判断） */
+export function isBlobLike(value) {
+    return TAG(value) === '[object Blob]' || TAG(value) === '[object File]';
+}
+
+export function toBytes(body) {
     if (!body) return null;
-    if (body instanceof Uint8Array) return body;
-    if (body instanceof ArrayBuffer) return new Uint8Array(body);
+    // ArrayBuffer.isView 依赖内部槽，跨 realm 也成立（Uint8Array / DataView / 其它 TypedArray）
     if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    if (isArrayBufferLike(body)) return new Uint8Array(body);
     return null; // Blob / FormData / string：由 toBytesAsync 处理
 }
 
-/** 支持 Blob/File 作为 body（某些拖拽实现直接给 File 而不是 arrayBuffer） */
-async function toBytesAsync(body) {
+/** 支持 Blob/File 作为 body（跨 realm 同样可用） */
+export async function toBytesAsync(body) {
     if (!body) return null;
-    if (typeof Blob !== 'undefined' && body instanceof Blob) {
-        return new Uint8Array(await body.arrayBuffer());
-    }
+    if (isBlobLike(body)) return new Uint8Array(await body.arrayBuffer());
     return toBytes(body);
 }
 
