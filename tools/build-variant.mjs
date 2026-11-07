@@ -115,12 +115,32 @@ async function patchForTT(outDir) {
     console.log('[build-variant]   · src/store/scripts.js 的 uuidv4 改为本地导入');
 }
 
+/** manifest.json 必须在产物里是「无 BOM 的合法 JSON」——TT 用 serde 解析，BOM 会直接报
+ *  `Invalid extension manifest.json: expected value at line 1 column 1` 导致更新失败。 */
+async function assertManifestValid(outDir) {
+    const file = path.join(outDir, 'manifest.json');
+    const bytes = await fs.readFile(file);
+    if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+        throw new Error(`产物 manifest.json 带 UTF-8 BOM（宿主会拒绝解析）：${file}`);
+    }
+    const text = bytes.toString('utf8');
+    if (!text.trimStart().startsWith('{')) {
+        throw new Error(`产物 manifest.json 不是 JSON 对象：${file}`);
+    }
+    try {
+        JSON.parse(text);
+    } catch (e) {
+        throw new Error(`产物 manifest.json 不是合法 JSON：${e.message}`);
+    }
+}
+
 async function build(kind) {
     const outDir = path.join(repoRoot, 'dist', kind);
     await fs.rm(outDir, { recursive: true, force: true });
     await copyTree(repoRoot, outDir);
 
     if (kind === 'tt') await patchForTT(outDir);
+    await assertManifestValid(outDir);
 
     const offenders = await findExternalImports(outDir);
     if (kind === 'tt' && offenders.length > 0) {

@@ -1,0 +1,14 @@
+# 统一换行，避免 Windows 上提交后出现 CRLF 差异
+* text=auto eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.zip binary
+
+# 这些必须是「无 BOM 的 UTF-8」：宿主用 serde/JSON.parse 直接读
+*.json text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
