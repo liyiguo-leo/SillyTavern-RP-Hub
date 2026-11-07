@@ -384,6 +384,34 @@ export function installMenuEntry(onClick) {
     }, 500);
 }
 
+/** 读酒馆助手（TH）的设置：渲染开关就在 extensionSettings.tavern_helper 里 */
+function thSettingsInfo() {
+    const c = stContext();
+    const th = c?.extensionSettings?.tavern_helper;
+    if (!th) return { found: false };
+    const render = th.render && typeof th.render === 'object' ? th.render : {};
+    const script = th.script && typeof th.script === 'object' ? th.script : {};
+    return {
+        found: true,
+        renderEnabled: render.enabled ?? null,
+        renderDepth: render.depth ?? null,
+        allowStreaming: render.allow_streaming ?? null,
+        scriptEnabled: script.enabled ?? null,
+        rawKeys: Object.keys(th).slice(0, 12),
+    };
+}
+
+/** 改酒馆助手设置（写回 extensionSettings 并保存） */
+function setThRender(patch = {}) {
+    const c = stContext();
+    if (!c?.extensionSettings?.tavern_helper) return { ok: false, reason: '没有酒馆助手设置' };
+    const th = c.extensionSettings.tavern_helper;
+    th.render = th.render && typeof th.render === 'object' ? th.render : {};
+    Object.assign(th.render, patch);
+    try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
+    return { ok: true, render: th.render };
+}
+
 /** 汇总诊断（复制/报告用） */export function collectReport(extra = {}) {
     const be = backend();
     const recent = typeof be?.recent === 'function' ? be.recent() : [];
@@ -458,6 +486,7 @@ function renderPanel(panel, extra) {
     const f = report.lastFailure;
     const state = lastState;
     const cards = lastCards;
+    const th = thSettingsInfo();
 
     const recentRows = report.recentRequests.map((r) => (
         `<tr><td style="white-space:nowrap">${new Date(r.at).toLocaleTimeString()}</td>`
@@ -500,8 +529,19 @@ function renderPanel(panel, extra) {
         </div>
       </div>
 
-      <div style="font-size:11px;background:#f2f6ff;border:1px solid #ccd9f2;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all">
-        <b>当前卡</b>：${esc(state?.name ?? '未知')}${state?.avatar ? `<br><span style="opacity:.7">${esc(state.avatar)}</span>` : ''}
+      <div style="font-size:11px;background:#f0fff6;border:1px solid #bfe6cf;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all">
+        <b>酒馆助手设置</b>（卡内前端由它渲染）
+        ${th.found
+            ? `<br>前端渲染=<b>${th.renderEnabled === null ? '?' : (th.renderEnabled ? '开' : '关')}</b> · 流式渲染=<b>${th.allowStreaming === null ? '?' : (th.allowStreaming ? '开' : '关')}</b> · 深度=${esc(th.renderDepth ?? '?')}`
+            : '<br>未找到 extensionSettings.tavern_helper（酒馆助手可能没装/没启用）'}
+        <div style="display:flex;gap:6px;margin-top:4px;flex-wrap:wrap">
+          <button data-act="th-render" style="font-size:11px;padding:1px 8px">切换前端渲染</button>
+          <button data-act="th-stream" style="font-size:11px;padding:1px 8px">切换流式渲染</button>
+          <button data-act="th-save-hint" style="font-size:11px;padding:1px 8px">保存提醒</button>
+        </div>
+      </div>
+
+      <div style="font-size:11px;background:#f2f6ff;border:1px solid #ccd9f2;border-radius:6px;padding:6px;margin-bottom:6px;word-break:break-all">        <b>当前卡</b>：${esc(state?.name ?? '未知')}${state?.avatar ? `<br><span style="opacity:.7">${esc(state.avatar)}</span>` : ''}
         ${state ? `<br><span style="opacity:.7">解析途径：${esc(state.resolvedVia || '?')} · 角色数：${esc(state.characterCount ?? '?')} · 酒馆助手：${state.hasTavernHelper ? '✓' : '✗'}</span>` : ''}<br>
         <b>正则引擎模式</b>：<span data-role="mode">${esc(modeInfo?.text ?? '查询中…')}</span><br>
         <b>识别来源</b>：自动判定=${esc(modeInfo?.auto ?? '?')} · 手动标记=${modeInfo?.marked ? '有' : '无'}<br>
@@ -712,6 +752,34 @@ function renderPanel(panel, extra) {
             if (res?.error) toast(`自动处理失败：${res.error}`);
             else if (last?.actions?.length) toast(`已自动处理：${last.actions.join(' / ')}`);
             else toast(last?.skipped ? `无需处理（${last.skipped}）` : '自动处理完成，无动作');
+        });
+    }
+
+    // 酒馆助手设置：直接在这里切换，省得去扩展抽屉里翻
+    const thRenderBtn = panel.querySelector('[data-act="th-render"]');
+    if (thRenderBtn) {
+        thRenderBtn.addEventListener('click', () => {
+            const info = thSettingsInfo();
+            const next = !(info.renderEnabled === true);
+            const res = setThRender({ enabled: next });
+            toast(res.ok ? `酒馆助手「前端渲染」已${next ? '开启' : '关闭'}，刷新页面后生效` : `切换失败：${res.reason}`);
+            void refresh(panel, extra);
+        });
+    }
+    const thStreamBtn = panel.querySelector('[data-act="th-stream"]');
+    if (thStreamBtn) {
+        thStreamBtn.addEventListener('click', () => {
+            const info = thSettingsInfo();
+            const next = !(info.allowStreaming === true);
+            const res = setThRender({ allow_streaming: next });
+            toast(res.ok ? `酒馆助手「流式渲染」已${next ? '开启' : '关闭'}，刷新页面后生效` : `切换失败：${res.reason}`);
+            void refresh(panel, extra);
+        });
+    }
+    const thHintBtn = panel.querySelector('[data-act="th-save-hint"]');
+    if (thHintBtn) {
+        thHintBtn.addEventListener('click', () => {
+            toast('酒馆助手设置就在这个面板里（extensionSettings.tavern_helper），改完会 saveSettingsDebounced；刷新页面生效');
         });
     }
 
