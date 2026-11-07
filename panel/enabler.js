@@ -190,6 +190,27 @@ function installRpc() {
             const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
             return { names, bound, charName: currentChar().name };
         },
+        /**
+         * 抓取当前卡内嵌的「酒馆助手脚本」原文（含前端界面 HTML/JS）。
+         * 用途：卡里的按钮点了没反应时，看它到底调用了什么（postMessage / triggerSlash / parent.document …）。
+         */
+        'card-scripts': () => {
+            const { char } = resolveCurrentChar();
+            const ext = char?.data?.extensions ?? {};
+            const th = ext.tavern_helper ?? {};
+            const scriptsObj = (th.scripts && typeof th.scripts === 'object') ? th.scripts : {};
+            const entries = Object.entries(scriptsObj).map(([name, value]) => {
+                const content = typeof value === 'string' ? value : (value?.content ?? '');
+                return { name, length: String(content).length, content: String(content).slice(0, 20000) };
+            });
+            return {
+                hasChar: !!char,
+                extKeys: Object.keys(ext),
+                thKeys: Object.keys(th),
+                scriptCount: entries.length,
+                scripts: entries.slice(0, 12),
+            };
+        },
     };
 
     window.addEventListener('message', async (event) => {

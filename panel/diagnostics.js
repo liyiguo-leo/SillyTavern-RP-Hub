@@ -153,6 +153,34 @@ export function probeNextClick(timeoutMs = 20000) {
     });
 }
 
+/**
+ * 追踪 iframe 之间的 postMessage（排查「卡内按钮点了没反应」）。
+ * 很多卡的前端界面是向宿主发消息来实现「填充输入框 / 发送」的，
+ * ST/TT 里没有 RP-Hub 那个宿主，消息就石沉大海。开这个开关能看到真实协议。
+ */
+export function traceIframeMessages(enable = true) {
+    const KEY = '__rphubTraceMessages';
+    if (!window[KEY]) {
+        window[KEY] = true;
+        window.addEventListener('message', (event) => {
+            if (!window[KEY]) return;
+            const data = event?.data;
+            const summary = (() => {
+                try {
+                    if (data == null) return String(data);
+                    if (typeof data !== 'object') return String(data).slice(0, 200);
+                    return `${data.type ?? '(no type)'} :: ${JSON.stringify(data).slice(0, 400)}`;
+                } catch { return '(无法序列化)'; }
+            })();
+            console.info('[rphub:trace] iframe message ←', summary, 'source=', event?.origin);
+        });
+        console.info('[rphub:trace] 已开始记录 iframe 消息：现在点一下卡里没反应的按钮，然后把 [rphub:trace] 行发我。');
+    }
+    window[KEY] = !!enable;
+    if (!enable) console.info('[rphub:trace] 已关闭');
+    return window[KEY];
+}
+
 /** 汇总诊断（复制/报告用） */export function collectReport(extra = {}) {
     const be = backend();
     const recent = typeof be?.recent === 'function' ? be.recent() : [];
@@ -279,6 +307,11 @@ function renderPanel(panel, extra) {
         </div>
         <div style="opacity:.72;margin-top:4px">只能有一个正则引擎：请关闭酒馆内置「正则」扩展后，再在这里放行本卡。</div>
         <div data-role="inspect" style="margin-top:4px"></div>
+        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+          <button data-act="card-scripts" style="font-size:11px;padding:1px 8px">抓卡内脚本</button>
+          <button data-act="trace-msg" style="font-size:11px;padding:1px 8px">追踪 iframe 消息</button>
+        </div>
+        <div data-role="scripts" style="margin-top:4px;max-height:190px;overflow:auto"></div>
       </div>
 
       <div style="font-size:11px;margin-bottom:6px;word-break:break-all">
@@ -316,11 +349,15 @@ function renderPanel(panel, extra) {
         try {
             const dev = await (window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__).then(() => window.__TAURITAVERN__?.api?.dev);
             if (!dev?.frontendLogs?.list) { box.textContent = '当前宿主没有 frontendLogs API'; return; }
-            const entries = await dev.frontendLogs.list({ limit: 200 });
-            const picked = (entries || []).filter((e) => String(e.message || '').includes('rphub')).slice(-40);
+            const entries = await dev.frontendLogs.list({ limit: 300 });
+            // 既看 rphub 自己的行，也看所有 warn/error（卡内 iframe 的报错会在这里冒出来）
+            const picked = (entries || [])
+                .filter((e) => String(e.message || '').includes('rphub')
+                    || e.level === 'error' || e.level === 'warn')
+                .slice(-60);
             box.innerHTML = picked.length
                 ? picked.map((e) => `<div style="white-space:pre-wrap;margin-bottom:2px">[${esc(e.level)}] ${esc(e.message)}</div>`).join('')
-                : '宿主日志里没有含 "rphub" 的条目';
+                : '宿主日志里没有 warn/error 或 rphub 条目';
         } catch (e) {
             box.textContent = `读取失败：${e?.message || e}`;
         }
@@ -472,6 +509,52 @@ function renderPanel(panel, extra) {
             if (res?.error) toast(`自动处理失败：${res.error}`);
             else if (last?.actions?.length) toast(`已自动处理：${last.actions.join(' / ')}`);
             else toast(last?.skipped ? `无需处理（${last.skipped}）` : '自动处理完成，无动作');
+        });
+    }
+
+    // 抓卡内脚本：看清按钮到底调用了什么（postMessage / triggerSlash / parent.document / TavernHelper）
+    const scriptsBtn = panel.querySelector('[data-act="card-scripts"]');
+    if (scriptsBtn) {
+        scriptsBtn.addEventListener('click', async () => {
+            const box = panel.querySelector('[data-role="scripts"]');
+            box.textContent = '抓取中…';
+            try {
+                const res = await rpc('card-scripts', {}, 20000);
+                if (res?.error || !res?.result) { box.textContent = `抓取失败：${res?.error || '酒馆助手未响应'}`; return; }
+                const data = res.result;
+                window.__rphubCardScripts = data;
+                const patterns = [
+                    { label: 'postMessage', re: /postMessage\s*\(/g },
+                    { label: 'send_textarea', re: /send_textarea/g },
+                    { label: 'triggerSlash', re: /triggerSlash/g },
+                    { label: 'parent.', re: /parent\./g },
+                    { label: 'TavernHelper.', re: /TavernHelper\./g },
+                    { label: 'insertOrReplace', re: /insertOrReplace/gi },
+                ];
+                const rows = (data.scripts || []).map((s) => {
+                    const hits = patterns
+                        .map((p) => { const n = (s.content.match(p.re) || []).length; return n ? `${p.label}×${n}` : null; })
+                        .filter(Boolean).join(' · ');
+                    return `<div style="margin-bottom:2px"><b>${esc(s.name)}</b> (${s.length}B)${hits ? `<br><span style="color:#c60">${esc(hits)}</span>` : ''}</div>`;
+                }).join('');
+                box.innerHTML = `<div style="background:#fff;border:1px dashed #bbb;border-radius:6px;padding:6px">
+                  extensions：${esc((data.extKeys || []).join(', ') || '（无）')}<br>
+                  tavern_helper 键：${esc((data.thKeys || []).join(', ') || '（无）')} · 脚本 ${data.scriptCount ?? 0} 条
+                  <div style="margin-top:4px">${rows || '（卡内没有酒馆助手脚本）'}</div>
+                  <div style="opacity:.7;margin-top:4px">完整内容已放到 window.__rphubCardScripts，可执行 copy(JSON.stringify(__rphubCardScripts)) 复制</div>
+                </div>`;
+            } catch (e) {
+                box.textContent = `抓取失败：${e?.message || e}`;
+            }
+        });
+    }
+
+    // 追踪 iframe 消息：很多卡的前端是「向宿主发消息」来填输入框/发送的，这里能看到真实协议
+    const traceBtn = panel.querySelector('[data-act="trace-msg"]');
+    if (traceBtn) {
+        traceBtn.addEventListener('click', () => {
+            traceIframeMessages(true);
+            toast('已开始记录 iframe 消息：请点一下卡里没反应的按钮，然后把 [rphub:trace] 行发我');
         });
     }
 

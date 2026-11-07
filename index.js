@@ -11,7 +11,8 @@
 import { installLocalBackend } from './local/fetch-shim.js';
 import { importToSt } from './panel/st-import.js';
 import { probeEnvironment, checkCoreScript } from './local/compat.js';
-import { mountDiagnostics, reportText, disableDiagnostics, probeNextClick } from './panel/diagnostics.js';
+import { mountDiagnostics, reportText, disableDiagnostics, probeNextClick, traceIframeMessages } from './panel/diagnostics.js';
+import { installCardBridge } from './panel/card-bridge.js';
 import { EXTENSION_VERSION } from './local/constants.js';
 
 export const EXTENSION_URL = new URL('./', import.meta.url).href;
@@ -28,11 +29,18 @@ export async function init() {
         console.error('[rphub] 本地后端安装失败：', error);
     }
 
-    // ② 诊断浮层（无控制台的宿主里是唯一的排障入口；必须先于引擎装载）
+    // ② 诊断浮层 + 卡内消息桥（无控制台的宿主里是唯一的排障入口；必须先于引擎装载）
     try {
         mountDiagnostics({ version: EXTENSION_VERSION });
     } catch (error) {
         console.warn('[rphub] 诊断浮层挂载失败：', error);
+    }
+
+    // 卡内前端（iframe）点选项没反应：很多卡是"给宿主发消息"来填输入框的，这里接住
+    try {
+        installCardBridge();
+    } catch (error) {
+        console.warn('[rphub] 卡内消息桥安装失败：', error);
     }
 
     // ③ 装载引擎 + 管道 + 面板（动态 import，失败可诊断）
@@ -85,5 +93,9 @@ try {
         probeClick: () => probeNextClick(),
         /** 彻底移除诊断浮层（下次启动也不挂载）；恢复：localStorage.removeItem('rphub:no-diagnostics') */
         disableDiagnostics: () => disableDiagnostics(),
+        /** 追踪 iframe 消息（排查卡内按钮点了没反应） */
+        traceIframeMessages: (on = true) => traceIframeMessages(on),
+        /** 卡内消息桥（把 iframe 发来的"写入文本"落到输入框）；默认开 */
+        cardBridge: () => window.__rphubCardBridge ?? null,
     };
 } catch { /* 忽略 */ }
