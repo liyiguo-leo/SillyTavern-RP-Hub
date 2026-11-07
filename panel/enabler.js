@@ -173,6 +173,18 @@ function installRpc() {
             return { config: next, last: run };
         },
         'auto-run': () => autoPrepare('manual'),
+        'worldbook-duplicates': () => findDuplicateGroups(),
+        'worldbook-delete': async ({ names: toDelete } = {}) => {
+            const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
+            const deleted = [];
+            const skipped = [];
+            for (const bookName of Array.isArray(toDelete) ? toDelete : []) {
+                if (!bookName) continue;
+                if (bound?.primary === bookName) { skipped.push(bookName); continue; }
+                try { await deleteWorldbook(bookName); deleted.push(bookName); } catch { skipped.push(bookName); }
+            }
+            return { deleted, skipped, boundPrimary: bound?.primary ?? null };
+        },
         'worldbooks': () => {
             const names = (() => { try { return getWorldbookNames(); } catch { return []; } })();
             const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
@@ -290,9 +302,26 @@ function toStWorldbookJson(list) {
 /**
  * 自动准备当前卡：放行 scoped 正则 + 把卡内世界书落地并绑定。
  * 幂等；只在真正做了动作时提示。
+ *
+ * 防重建世界书的关键：**先按内容指纹找已有的那本**（TT 在你点“导入附带世界书”时
+ * 已经建过一本，但绑定是异步的，我们若只看 primary 就会重复创建 → 两张书）。
+ *
  * @param {'event'|'manual'|'config'} reason
  */
-async function autoPrepare(reason = 'event') {
+/**
+ * 串行化包装：换卡事件 + 卡名轮询 + 手动触发可能同时到达，
+ * 并发进入会各自看到「世界书还不存在」→ 重复创建。这里排队执行。
+ */
+let autoChain = Promise.resolve();
+function autoPrepare(reason = 'event') {
+    autoChain = autoChain.then(
+        () => doAutoPrepare(reason),
+        () => doAutoPrepare(reason),
+    );
+    return autoChain;
+}
+
+async function doAutoPrepare(reason = 'event') {
     const config = readAutoConfig();
     const be = getLocalBackend();
     const { name, avatar, ctx } = resolveCurrentChar();
@@ -322,34 +351,63 @@ async function autoPrepare(reason = 'event') {
             }
         }
 
-        // ② 卡内世界书落地 + 绑定（RP助手 注入依赖角色 primary 世界书）
+        // ② 卡内世界书落地 + 绑定
         if (config.worldbook) {
             const lr = await fetch(`${be.base}/cards/${encodeURIComponent(info.cardId)}/lorebook`)
                 .then((r) => (r.ok ? r.json() : null)).catch(() => null);
             const entries = Array.isArray(lr?.lorebook) ? lr.lorebook : [];
             if (entries.length > 0) {
+                const wantedKey = signatureKey(entries);
                 const names = (() => { try { return getWorldbookNames(); } catch { return []; } })();
                 const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
-                const primary = bound?.primary || null;
-                const target = (primary && names.includes(primary)) ? primary : `${name}'s Lorebook`;
-                out.worldbook = target;
+                const boundPrimary = bound?.primary || null;
 
-                if (!names.includes(target)) {
-                    try {
-                        await importRawWorldbook(target, toStWorldbookJson(entries));
-                        out.actions.push('create-worldbook');
-                    } catch (e) {
-                        out.worldbookError = e?.message || String(e);
+                // 候选顺序：角色卡声明的世界书 → 已绑定且存在 → 内容指纹命中 → 兜底名
+                const declared = (() => { try { return resolveCurrentChar().char?.data?.extensions?.world || null; } catch { return null; } })();
+                let target = null;
+                const candidates = [declared, boundPrimary].filter((x) => typeof x === 'string' && x);
+                for (const candidate of candidates) {
+                    if (!names.includes(candidate)) continue;
+                    const same = await bookMatches(candidate, wantedKey);
+                    if (same) { target = candidate; break; }
+                }
+
+                if (!target) {
+                    // 内容指纹扫描：TT/ST 已导入的那本（名字可能不同）会被这里认出
+                    target = await findBookBySignature(names, wantedKey);
+                    if (target) out.actions.push('reuse-worldbook');
+                }
+
+                if (!target && boundPrimary && names.includes(boundPrimary)) target = boundPrimary;
+
+                if (!target) {
+                    target = `${name}'s Lorebook`;
+                    if (names.includes(target)) {
+                        target = `（无法复用）`; // 同名但内容不同 → 不覆盖用户的书
                     }
                 }
-                try {
-                    await rebindCharWorldbooks('current', {
-                        primary: target,
-                        additional: Array.isArray(bound?.additional) ? bound.additional : [],
-                    });
-                    if (bound?.primary !== target) out.actions.push('bind-worldbook');
-                } catch (e) {
-                    out.bindError = e?.message || String(e);
+
+                if (target && target !== '（无法复用）') {
+                    if (!names.includes(target)) {
+                        try {
+                            await importRawWorldbook(target, toStWorldbookJson(entries));
+                            out.actions.push('create-worldbook');
+                        } catch (e) {
+                            out.worldbookError = e?.message || String(e);
+                        }
+                    }
+                    out.worldbook = target;
+                    try {
+                        await rebindCharWorldbooks('current', {
+                            primary: target,
+                            additional: Array.isArray(bound?.additional) ? bound.additional : [],
+                        });
+                        if (bound?.primary !== target) out.actions.push('bind-worldbook');
+                    } catch (e) {
+                        out.bindError = e?.message || String(e);
+                    }
+                } else {
+                    out.worldbookSkipped = '同名世界书内容不同，已跳过以免覆盖';
                 }
             }
         }
@@ -399,4 +457,51 @@ function startAuto() {
     } catch { /* 忽略 */ }
 
     console.info('[rphub:panel] 自动化已启动（放行正则 / 落地世界书，可在诊断面板关闭）');
+}
+
+/* ---------------- 世界书内容指纹（防重复创建 / 查重） ---------------- */
+
+function normEntry(entry) {
+    const name = String(entry?.name ?? entry?.comment ?? '').trim();
+    const content = String(entry?.content ?? '').replace(/\s+/g, '');
+    return `${name}::${content.slice(0, 60)}`;
+}
+
+/** 一组条目的内容指纹：条数 + 排序后的「名字::内容前缀」摘要 */
+function signatureKey(list) {
+    const parts = (Array.isArray(list) ? list : []).map(normEntry).sort();
+    return `${parts.length}#${parts.join('|').slice(0, 400)}`;
+}
+
+/** 某本世界书是否与给定指纹一致 */
+async function bookMatches(bookName, key) {
+    try {
+        const list = await getWorldbook(bookName);
+        return signatureKey(list) === key;
+    } catch {
+        return false;
+    }
+}
+
+/** 在已有世界书里按内容指纹找同一本（TT/ST 已导入的那本名字可能不同） */
+async function findBookBySignature(names, key, limit = 40) {
+    for (const bookName of (names || []).slice(0, limit)) {
+        if (await bookMatches(bookName, key)) return bookName;
+    }
+    return null;
+}
+
+/** 找出内容重复的世界书分组（用于体检/清理） */
+async function findDuplicateGroups(limit = 60) {
+    const names = (() => { try { return getWorldbookNames(); } catch { return []; } })();
+    const groups = new Map();
+    for (const bookName of names.slice(0, limit)) {
+        let key;
+        try { key = signatureKey(await getWorldbook(bookName)); } catch { continue; }
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(bookName);
+    }
+    const duplicates = [...groups.values()].filter((g) => g.length > 1);
+    const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
+    return { total: names.length, duplicates, boundPrimary: bound?.primary ?? null };
 }

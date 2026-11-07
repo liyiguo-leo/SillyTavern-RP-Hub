@@ -348,6 +348,32 @@ function renderPanel(panel, extra) {
                       当前卡绑定：primary=<b>${esc(bound?.primary ?? '（无）')}</b> · additional=${(bound?.additional || []).length}
                     </div>`);
                 }
+
+                // 重复世界书检测（内容指纹相同的多本 → 一键清理，保留已绑定的那本）
+                const dup = await rpc('worldbook-duplicates', {}, 30000);
+                const groups = Array.isArray(dup?.result?.duplicates) ? dup.result.duplicates : [];
+                if (groups.length > 0) {
+                    const boundPrimary = dup.result.boundPrimary || null;
+                    box.insertAdjacentHTML('beforeend', `<div style="background:#fff8f0;border:1px solid #f0d3b0;border-radius:6px;padding:6px;margin-top:4px">
+                      <b>重复世界书</b>：${groups.length} 组
+                      <div style="opacity:.8;margin-top:2px">${groups.map((g) => esc(g.join('  /  '))).join('<br>')}</div>
+                      <button data-act="dedupe-worldbooks" style="font-size:11px;padding:1px 8px;margin-top:4px">保留绑定的那本，删除其余</button>
+                    </div>`);
+                    box.querySelector('[data-act="dedupe-worldbooks"]').addEventListener('click', async () => {
+                        const toDelete = [];
+                        for (const group of groups) {
+                            const keep = group.includes(boundPrimary) ? boundPrimary : group[0];
+                            toDelete.push(...group.filter((n) => n !== keep));
+                        }
+                        if (toDelete.length === 0) { toast('没有可删除的重复项（都绑着呢）'); return; }
+                        const result = await rpc('worldbook-delete', { names: toDelete }, 30000);
+                        if (result?.error) { toast(`清理失败：${result.error}`); return; }
+                        const done = result?.result?.deleted?.length ?? 0;
+                        const skipped = result?.result?.skipped?.length ?? 0;
+                        toast(`已删除 ${done} 本重复世界书${skipped ? `，跳过 ${skipped} 本（正在使用）` : ''}`);
+                        await refresh(panel, extra);
+                    });
+                }
             } catch (e) {
                 box.textContent = `体检失败：${e?.message || e}`;
             }
