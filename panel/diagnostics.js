@@ -93,6 +93,7 @@ try {
                 }
             } catch { /* 忽略 */ }
             if (typeof window.__rphubRenderDiagnostics === 'function') window.__rphubRenderDiagnostics();
+            try { window.__rphubShowDiagnostics?.(); } catch { /* 忽略 */ }
         }
     });
 } catch { /* 忽略 */ }
@@ -517,6 +518,12 @@ export function mountDiagnostics(extra = {}) {
     layout(panel, btn);
     window.addEventListener('resize', () => layout(panel, btn));
 
+    // 默认不显示：诊断只是排障入口，正常使用不该占屏。
+    // 出现失败时自动出现；也可用 ?rphub=debug 或控制台 __rphubShowDiagnostics() 调出。
+    const debugRequested = (() => { try { return /[?&]rphub=debug\b/.test(location.search); } catch { return false; } })();
+    btn.style.display = debugRequested ? '' : 'none';
+    window.__rphubShowDiagnostics = () => { btn.style.display = ''; };
+
     btn.addEventListener('click', () => {
         const open = panel.style.display === 'none' || !panel.style.display;
         panel.style.display = open ? 'block' : 'none';
@@ -544,6 +551,7 @@ export function mountDiagnostics(extra = {}) {
             } catch { /* 忽略 */ }
             panel.style.display = 'block';
             renderPanel(panel, extra);
+            try { window.__rphubShowDiagnostics?.(); } catch { /* 忽略 */ }
         });
     }
 
