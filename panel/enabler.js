@@ -145,6 +145,78 @@ function installRpc() {
             if (!be?.base) return { ok: false, reason: '本地后端未安装' };
             return fetch(`${be.base}/cards`).then((r) => (r.ok ? r.json() : { ok: false, reason: `HTTP ${r.status}` }));
         },
+        /**
+         * 把本地库里解析出的角色卡世界书装进酒馆：创建世界书 → 绑定到当前角色。
+         * 卡内 character_book 在 ST/TT 里不会自动变成世界书文件，所以 RP助手 的注入找不到目标。
+         */
+        'install-lorebook': async ({ name, entries } = {}) => {
+            const { name: charName } = currentChar();
+            const bookName = String(name || '').trim() || `${charName || 'Character'}'s Lorebook`;
+            const list = Array.isArray(entries) ? entries : [];
+            if (list.length === 0) return { ok: false, reason: '没有可导入的条目' };
+
+            // 转成酒馆 world info JSON（交给 importRawWorldbook，避免自己猜 TH 的结构化字段）
+            const stEntries = {};
+            list.forEach((entry, index) => {
+                stEntries[String(index)] = {
+                    uid: index,
+                    key: Array.isArray(entry.keys) ? entry.keys : [],
+                    keysecondary: [],
+                    comment: entry.name || entry.comment || `Entry ${index}`,
+                    content: entry.content || '',
+                    constant: !!entry.constant,
+                    selective: !!entry.selective,
+                    selectiveLogic: 0,
+                    addMemo: true,
+                    order: 100,
+                    position: typeof entry.position === 'number' ? entry.position : 4,
+                    disable: !!entry.disable,
+                    excludeRecursion: !!entry.excludeRecursion,
+                    preventRecursion: false,
+                    delayUntilRecursion: false,
+                    probability: typeof entry.probability === 'number' ? entry.probability : 100,
+                    useProbability: true,
+                    depth: typeof entry.depth === 'number' ? entry.depth : 4,
+                    group: '',
+                    scanDepth: null,
+                    caseSensitive: null,
+                    matchWholeWords: null,
+                    useGroupScoring: null,
+                    automationId: '',
+                    role: 0,
+                    vectorized: false,
+                    sticky: 0,
+                    cooldown: 0,
+                    delay: 0,
+                };
+            });
+            const json = JSON.stringify({ entries: stEntries }, null, 2);
+
+            const result = { ok: true, name: bookName, entries: list.length, imported: false, bound: false };
+            try {
+                const existing = (() => { try { return getWorldbookNames(); } catch { return []; } })();
+                if (!existing.includes(bookName)) {
+                    await importRawWorldbook(bookName, json);
+                    result.imported = true;
+                }
+            } catch (e) {
+                return { ok: false, reason: `导入世界书失败：${e?.message || e}` };
+            }
+
+            try {
+                const current = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
+                if (current) {
+                    await rebindCharWorldbooks('current', {
+                        primary: bookName,
+                        additional: Array.isArray(current.additional) ? current.additional : [],
+                    });
+                    result.bound = true;
+                }
+            } catch (e) {
+                result.bindError = e?.message || String(e);
+            }
+            return result;
+        },
     };
 
     window.addEventListener('message', async (event) => {

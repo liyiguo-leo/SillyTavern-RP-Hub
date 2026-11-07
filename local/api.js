@@ -158,6 +158,13 @@ export async function handleRequest(req) {
             const importedAt = new Date().toISOString();
             const cardId = 'c' + sha256HexString(contentHash + characterName + importedAt).slice(0, 16);
 
+            // 同一张卡重复导入：先摘掉旧记录，避免卡库里堆同名副本（by-name 只取最新，其他视图会误导）
+            const duplicateId = await findByContentHash(contentHash);
+            if (duplicateId) {
+                await rollbackCard(duplicateId);
+                console.info(`[rphub-local] 同一 contentHash 已存在（${duplicateId}），已替换为本次导入`);
+            }
+
             const meta = {
                 cardId,
                 format,

@@ -187,11 +187,13 @@ function renderPanel(panel, extra) {
         <b>当前卡</b>：${esc(state?.name ?? '未知')}${state?.avatar ? `<br><span style="opacity:.7">${esc(state.avatar)}</span>` : ''}
         ${state ? `<br><span style="opacity:.7">解析途径：${esc(state.resolvedVia || '?')} · 角色数：${esc(state.characterCount ?? '?')} · 酒馆助手：${state.hasTavernHelper ? '✓' : '✗'}</span>` : ''}<br>
         <b>正则引擎模式</b>：<span data-role="mode">${esc(modeInfo?.text ?? '查询中…')}</span><br>
+        <b>识别来源</b>：自动判定=${esc(modeInfo?.auto ?? '?')} · 手动标记=${modeInfo?.marked ? '有' : '无'}<br>
         <b>卡内正则（scoped）</b>：<b style="color:${allowedColor}">${esc(allowedText)}</b>
         <div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap">
           <button data-act="allow" style="font-size:11px;padding:1px 8px">允许</button>
           <button data-act="deny" style="font-size:11px;padding:1px 8px">撤销</button>
           ${modeInfo?.cardId ? '<button data-act="inspect" style="font-size:11px;padding:1px 8px">卡面体检</button>' : ''}
+          ${modeInfo?.cardId ? '<button data-act="install-lorebook" style="font-size:11px;padding:1px 8px">导入卡面世界书</button>' : ''}
           ${modeInfo?.marked ? '<button data-act="unmark" style="font-size:11px;padding:1px 8px">取消标记</button>' : ''}
           ${modeInfo?.notInLibrary ? '<button data-act="mark-rp" style="font-size:11px;padding:1px 8px">手动标记为 RP</button>' : ''}
         </div>
@@ -333,6 +335,31 @@ function renderPanel(panel, extra) {
             }
         });
     }
+
+    // 导入卡面世界书：卡内 character_book 在酒馆里不会自动变成世界书文件，这里补上并绑定到当前卡
+    const loreBtn = panel.querySelector('[data-act="install-lorebook"]');
+    if (loreBtn) {
+        loreBtn.addEventListener('click', async () => {
+            const be = backend();
+            const cardId = modeInfo?.cardId;
+            if (!be?.base || !cardId) { toast('没有可用的卡记录'); return; }
+            try {
+                const res = await fetch(`${be.base}/cards/${cardId}/lorebook`);
+                if (!res.ok) throw new Error(`读取世界书失败 HTTP ${res.status}`);
+                const data = await res.json();
+                const entries = Array.isArray(data.lorebook) ? data.lorebook : [];
+                if (entries.length === 0) { toast('这张卡没有卡内世界书条目'); return; }
+                const out = await rpc('install-lorebook', { entries }, 30000);
+                if (!out || out.error) throw new Error(out?.error || '酒馆助手未响应');
+                const r = out.result || {};
+                if (!r.ok) throw new Error(r.reason || '未知失败');
+                toast(`世界书就绪：${r.name}（${r.entries} 条${r.imported ? '，已新建' : '，已存在'}${r.bound ? '，已绑定当前卡' : `，未绑定${r.bindError ? `：${r.bindError}` : ''}`}）`);
+                await refresh(panel, extra);
+            } catch (e) {
+                toast(`导入世界书失败：${e?.message || e}`);
+            }
+        });
+    }
 }
 
 /** 查当前卡在本地库里的语义模式 */
@@ -352,12 +379,26 @@ async function lookupMode(be) {
         }
         if (!res.ok) return { text: `HTTP ${res.status}` };
         const data = await res.json();
-        return {
+        const info = {
             text: `${data.formatDetail}${data.marked ? '（手动标记）' : ''}`,
             cardId: data.cardId ?? null,
             contentHash: data.contentHash ?? null,
             marked: !!data.marked,
+            auto: data.formatDetail ?? null,
         };
+        // 再读一次卡体，取「自动判定」的原始 formatDetail（它与 marks 覆盖后的生效值可能不同）
+        if (info.cardId) {
+            try {
+                const r2 = await fetch(`${be.base}/cards/${info.cardId}`);
+                if (r2.ok) {
+                    const d2 = await r2.json();
+                    if (d2?.formatDetail) info.auto = d2.formatDetail;
+                    info.lorebookCount = Array.isArray(d2?.lorebook) ? d2.lorebook.length : null;
+                    info.regexCount = Array.isArray(d2?.regex) ? d2.regex.length : null;
+                }
+            } catch { /* 忽略 */ }
+        }
+        return info;
     } catch {
         return { text: '查询失败' };
     }
