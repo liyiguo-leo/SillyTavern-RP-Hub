@@ -23,8 +23,26 @@ function transformCardJson(parsed) {
         ? parsed.data
         : parsed;
     if (!looksLikeRpHubCard(card)) return { changed: false };
+
+    let changed = false;
+
+    // ① 位置归一：有些 RP 卡把正则放在 data.regex_scripts（顶层），引擎只读
+    //    data.extensions.regex_scripts —— 导入时补一份到标准位，避免「正则不生效」。
+    const topLevel = Array.isArray(card.regex_scripts) ? card.regex_scripts : null;
+    if (topLevel && topLevel.length > 0) {
+        card.extensions = (card.extensions && typeof card.extensions === 'object') ? card.extensions : {};
+        const extList = card.extensions.regex_scripts;
+        if (!Array.isArray(extList) || extList.length === 0) {
+            card.extensions.regex_scripts = topLevel.map((script) => ({ ...script }));
+            changed = true;
+        }
+    }
+
+    // ② 补名字（只补空值）
     const result = nameRegexScriptsInCard(card);
-    return { changed: result.changed > 0 };
+    if (result.changed > 0) changed = true;
+
+    return { changed };
 }
 
 /**

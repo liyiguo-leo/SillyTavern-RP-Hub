@@ -185,5 +185,29 @@ console.log('\n[5] JSON 卡与开关');
     globalThis.localStorage._v = null;
 }
 
+/* ---------------- 6. 顶层正则归一 ---------------- */
+
+console.log('\n[6] 顶层 regex_scripts → extensions.regex_scripts（引擎只读后者）');
+{
+    globalThis.localStorage._v = null;
+    const topOnly = {
+        spec: 'chara_card_v3',
+        data: {
+            name: '顶层正则卡',
+            description: '',
+            extensions: { rp_hub_watermark: 'RP-Hub' },
+            regex_scripts: [{ findRegex: '(.+)', replaceString: '<b style="color:red">$1</b>' }],
+        },
+    };
+    const png = buildPng({ text: { keyword: 'chara', value: Buffer.from(JSON.stringify(topOnly)).toString('base64') } });
+    const out = await prepareCardBytes(new Uint8Array(png));
+    const parsed = await parsePng(new Uint8Array(out));
+    const ext = parsed.data?.extensions?.regex_scripts;
+
+    ok(Array.isArray(ext) && ext.length === 1, '复制到 extensions.regex_scripts', String(ext?.length));
+    ok(ext?.[0]?.scriptName?.startsWith('RP·'), '复制过来的条目带名字', ext?.[0]?.scriptName);
+    ok(Array.isArray(parsed.data?.regex_scripts) && parsed.data.regex_scripts.length === 1, '顶层原数组保留（不破坏作者数据）');
+}
+
 console.log(`\n=== ${failed === 0 ? '全部通过' : `${failed} 项失败`} ===`);
 process.exit(failed === 0 ? 0 : 1);

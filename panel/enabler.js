@@ -88,10 +88,11 @@ const autoDone = new Set();
 function readAutoConfig() {
     try {
         const raw = JSON.parse(localStorage.getItem(AUTO_KEY) || '{}');
-        // 默认：放行卡内正则（原卡自带美化）+ 世界书自动落地
-        return { regex: true, worldbook: true, ...(raw && typeof raw === 'object' ? raw : {}) };
+        // 默认：放行卡内正则（原卡自带美化）+ 世界书只复用/绑定（**不新建**，避免与
+        // 酒馆原生导入、RP助手 的建书路径撞成两本）
+        return { regex: true, worldbook: true, worldbookCreate: false, ...(raw && typeof raw === 'object' ? raw : {}) };
     } catch {
-        return { regex: true, worldbook: true };
+        return { regex: true, worldbook: true, worldbookCreate: false };
     }
 }
 
@@ -222,11 +223,14 @@ async function doAutoPrepare(reason = 'event') {
                 }
                 if (!target) target = await findBookBySignature(names, wantedKey);
                 if (!target && boundPrimary && names.includes(boundPrimary)) target = boundPrimary;
-                if (!target) {
+
+                // 不新建：酒馆原生导入与 RP助手 各有自己的建书路径，我们再建就会多一本。
+                // 需要时（worldbookCreate=true）才兜底建 `<卡名>'s Lorebook`。
+                if (!target && config.worldbookCreate === true) {
                     const fallback = `${name}'s Lorebook`;
-                    // 同名但内容不同 → 不去覆盖用户的书
                     if (!names.includes(fallback)) target = fallback;
                 }
+                if (!target) out.worldbookSkipped = 'no-match-no-create';
 
                 const doneKey = `wb:${name}:${target ?? 'none'}`;
                 if (target && !autoDone.has(doneKey)) {
@@ -282,5 +286,17 @@ function startAuto() {
     } catch { /* 忽略 */ }
 
     setTimeout(run, 2000);
-    console.info('[rphub:panel] 自动化已启动（只放行正则 / 落地世界书，幂等）');
+
+    // 导入完成后没有事件通知（导入是宿主行为）→ 前 60 秒轻量轮询：
+    // 只在「本地库出现该卡」时才会真正动作，且 autoDone 保证每卡只处理一次。
+    try {
+        let ticks = 0;
+        const timer = setInterval(() => {
+            ticks += 1;
+            if (ticks > 20) { clearInterval(timer); return; }
+            run();
+        }, 3000);
+    } catch { /* 忽略 */ }
+
+    console.info('[rphub:panel] 自动化已启动（放行正则 / 复用并绑定世界书，不新建）');
 }
