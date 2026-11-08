@@ -206,12 +206,15 @@ async function doAutoPrepare(reason = 'event') {
             }
         }
 
-        // ② 卡内世界书落地 + 绑定（找到同内容的世界书就复用，绝不重建）
-        if (config.worldbook) {
+        // ② 卡内世界书：只复用/绑定，不新建（避免与酒馆原生导入、RP助手 撞成多本）
+        //    每张卡只扫描一次内容指纹（扫描要读多本世界书，不能每 3 秒重来）
+        if (config.worldbook && !autoDone.has(`wb-scan:${name}`)) {
             const lr = await fetch(`${be.base}/cards/${encodeURIComponent(info.cardId)}/lorebook`)
                 .then((r) => (r.ok ? r.json() : null)).catch(() => null);
             const entries = Array.isArray(lr?.lorebook) ? lr.lorebook : [];
-            if (entries.length > 0) {
+            if (entries.length === 0) {
+                autoDone.add(`wb-scan:${name}`);
+            } else {
                 const wantedKey = signatureKey(entries);
                 const names = (() => { try { return getWorldbookNames(); } catch { return []; } })();
                 const bound = (() => { try { return getCharWorldbookNames('current'); } catch { return null; } })();
@@ -230,7 +233,10 @@ async function doAutoPrepare(reason = 'event') {
                     const fallback = `${name}'s Lorebook`;
                     if (!names.includes(fallback)) target = fallback;
                 }
-                if (!target) out.worldbookSkipped = 'no-match-no-create';
+                if (!target) {
+                    out.worldbookSkipped = 'no-match-no-create';
+                    autoDone.add(`wb-scan:${name}`);   // 扫描过且无可复用 → 本会话不再重复扫描
+                }
 
                 const doneKey = `wb:${name}:${target ?? 'none'}`;
                 if (target && !autoDone.has(doneKey)) {
@@ -256,6 +262,7 @@ async function doAutoPrepare(reason = 'event') {
                     }
                     autoDone.add(doneKey);
                 }
+                autoDone.add(`wb-scan:${name}`);       // 本会话该卡的世界书已处理完
             }
         }
     } catch (e) {

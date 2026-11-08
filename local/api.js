@@ -375,6 +375,9 @@ export async function handleRequest(req) {
 
             const rec = await readCard(cardId);
             const normalized = rec.normalized;
+            if (!normalized) {
+                return err(500, 'CARD_DATA_MISSING', '这张卡的卡体数据缺失（旧版卡库未迁移），请重新导入该卡');
+            }
             const category = seg[2] || 'all';
             const fields = parseFields(query);
             const { offset, limit } = parsePage(query);

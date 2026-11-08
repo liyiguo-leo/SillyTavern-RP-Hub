@@ -171,9 +171,36 @@ export function getStore() {
 
 /* ---------------- 高层读写：保持后端语义 ---------------- */
 
+let migrated = false;
+
+/**
+ * v1 → v2 迁移：v1 的 cards 记录里同时装着 normalized/raw。
+ * 升级后这些字段仍留在元数据表里，而视图读的是 payload 表 → 会读不到卡体。
+ * 这里一次性把历史记录搬进 payload 表，并把重字段从元数据里剥掉。
+ */
+async function ensureMigrated(store) {
+    if (migrated) return;
+    migrated = true;
+    try {
+        const metas = await store.listMetas();
+        for (const meta of metas) {
+            if (!meta || (!meta.normalized && !meta.raw)) continue;
+            const payload = await store.getPayload(meta.cardId);
+            if (!payload) {
+                await store.putPayload({ cardId: meta.cardId, normalized: meta.normalized ?? null, raw: meta.raw ?? null });
+            }
+            const { normalized, raw, ...rest } = meta;
+            await store.putMeta(rest);
+        }
+    } catch (error) {
+        console.warn('[rphub-local] 卡库迁移失败（不影响使用）：', error?.message || error);
+    }
+}
+
 /** 卡索引（等价 index.json）——只读元数据表，不碰卡体 */
 export async function readIndex() {
     const store = await getStore();
+    await ensureMigrated(store);
     const metas = await store.listMetas();
     const index = { version: 1, cards: {} };
     for (const meta of metas) {
@@ -194,9 +221,24 @@ export async function hasCard(cardId) {
  */
 export async function readCard(cardId) {
     const store = await getStore();
+    await ensureMigrated(store);
+
     const meta = await store.getMeta(cardId);
     if (!meta) return null;
-    const payload = await store.getPayload(cardId);
+
+    let payload = await store.getPayload(cardId);
+
+    // 逐条兜底迁移：旧记录把 normalized/raw 塞在元数据里 → 搬到 payload 表
+    if (!payload && (meta.normalized || meta.raw)) {
+        payload = { cardId, normalized: meta.normalized ?? null, raw: meta.raw ?? null };
+        try {
+            await store.putPayload(payload);
+            const { normalized, raw, ...rest } = meta;
+            await store.putMeta(rest);
+            return { ...rest, normalized: payload.normalized, raw: payload.raw };
+        } catch { /* 迁移失败就用内存里的值 */ }
+    }
+
     return { ...meta, normalized: payload?.normalized ?? null, raw: payload?.raw ?? null };
 }
 

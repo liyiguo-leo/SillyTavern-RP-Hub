@@ -12,7 +12,7 @@
 
 import {
     writeCard, readIndex, findByName, findByContentHash, readCard, hasCard,
-    rollbackCard, stats, exportLibrary, importLibrary, readMarks, writeMark,
+    rollbackCard, stats, exportLibrary, importLibrary, readMarks, writeMark, getStore,
 } from '../local/store.js';
 import { buildPng, rpCardJson, stCardJson } from './fixtures.mjs';
 import { runPipeline } from '../local/pipeline.js';
@@ -89,6 +89,31 @@ console.log('\n[4] 卡库导出 / 导入（跨设备迁移）');
     ok(result.cards === 2 && result.marks === 1, '导入计数', JSON.stringify(result));
     ok(!!back?.normalized, '导入后卡体可读');
     ok((await readMarks()).marks[a.contentHash]?.type === 'rphub', '导入后 marks 可读');
+}
+
+
+console.log('\n[5] 旧版卡库迁移（v1 记录把 normalized 塞在元数据里）');
+{
+    const store = await getStore();
+    const legacyId = 'c1111111111111111';
+    await store.putMeta({
+        cardId: legacyId,
+        characterName: '旧卡',
+        nameKey: '旧卡',
+        format: 'png',
+        formatDetail: 'st',
+        importedAt: '2024-01-01T00:00:00.000Z',
+        contentHash: 'a'.repeat(64),
+        normalized: { format: 'png', formatDetail: 'st', schema_version: 2, character: { name: '旧卡' }, regex: [], lorebook: [] },
+        raw: { blocks: [], originalJson: null },
+    });
+    const card = await readCard(legacyId);
+    ok(card?.normalized?.character?.name === '旧卡', '旧记录仍能读到卡体（自动迁移）');
+    const meta2 = await store.getMeta(legacyId);
+    ok(meta2 && !('normalized' in meta2), '迁移后元数据已剥离卡体');
+    const payload2 = await store.getPayload(legacyId);
+    ok(!!payload2?.normalized, 'payload 表已写入');
+    await rollbackCard(legacyId);
 }
 
 console.log(`\n=== ${failed === 0 ? '全部通过' : `${failed} 项失败`} ===`);

@@ -143,10 +143,10 @@ node tools/store-test.mjs      # 17 项：卡库分表（元数据不拖卡体�
 
 1. 只有本地库里 `formatDetail=rphub` 的卡才处理，普通卡完全不动；
 2. **自动放行**卡内 scoped 正则（写 `character_allowed_regex`）；
-3. **自动落地世界书**：把卡内 `character_book` 建成 `<卡名>'s Lorebook`，
-   并用 `rebindCharWorldbooks('current', { primary, additional })` 绑到当前角色。
+3. **复用并绑定世界书（不新建）**：按内容指纹找已存在的同内容世界书，找不到就交给酒馆 / RP助手 自己建；
+   找到则用 `rebindCharWorldbooks('current', { primary, additional })` 绑到当前角色。
 
-自动化默认开启。要退回手动（不自动放行、不自动建世界书）：
+自动化默认开启。要退回手动（不放行正则、不处理世界书）：
 ```js
 localStorage.setItem("rphub:auto", JSON.stringify({ regex: false, worldbook: false }))
 ```

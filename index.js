@@ -23,8 +23,6 @@ export async function init() {
         console.error('[rphub] 本地后端安装失败：', error);
     }
 
-    // 正则管理终端（魔术棒菜单入口；逐条开关角色卡/全局正则）
-    // 2026-11 回滚：按用户要求移除（如需恢复，见 git 历史 cf62637）
 
     try {
         const boot = await import('./boot.js');
