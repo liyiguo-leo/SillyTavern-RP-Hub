@@ -88,10 +88,10 @@ const autoDone = new Set();
 function readAutoConfig() {
     try {
         const raw = JSON.parse(localStorage.getItem(AUTO_KEY) || '{}');
-        // 默认：世界书自动落地；**卡内正则不自动放行**（不启用 RP-Hub 的正则美化）
-        return { regex: false, worldbook: true, ...(raw && typeof raw === 'object' ? raw : {}) };
+        // 默认：放行卡内正则（原卡自带美化）+ 世界书自动落地
+        return { regex: true, worldbook: true, ...(raw && typeof raw === 'object' ? raw : {}) };
     } catch {
-        return { regex: false, worldbook: true };
+        return { regex: true, worldbook: true };
     }
 }
 
@@ -190,29 +190,18 @@ async function doAutoPrepare(reason = 'event') {
         const info = await res.json();
         if (info.formatDetail !== 'rphub') return out; // 普通卡完全让位
 
-        // ① scoped 正则放行：默认关闭（不启用 RP-Hub 的正则美化）
-        //    如果之前被本扩展放行过（avatar 还在名单里），这里顺手撤回，避免卡内正则继续生效。
-        if (avatar) {
+        // ① 放行卡内 scoped 正则（原卡自带美化）：默认开，且**不再自动撤销**
+        if (config.regex && avatar) {
+            const key = `regex:${avatar}`;
             const c = ctx ?? stCtx();
             const list = c?.extensionSettings?.character_allowed_regex;
-            if (config.regex) {
-                const key = `regex:${avatar}`;
-                if (!autoDone.has(key) && (!Array.isArray(list) || !list.includes(avatar))) {
-                    c.extensionSettings = c.extensionSettings || {};
-                    c.extensionSettings.character_allowed_regex = Array.isArray(list) ? list : [];
-                    c.extensionSettings.character_allowed_regex.push(avatar);
-                    try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
-                    autoDone.add(key);
-                    out.actions.push('allow-regex');
-                }
-            } else if (Array.isArray(list) && list.includes(avatar)) {
-                const key = `regex-off:${avatar}`;
-                if (!autoDone.has(key)) {
-                    c.extensionSettings.character_allowed_regex = list.filter((x) => x !== avatar);
-                    try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
-                    autoDone.add(key);
-                    out.actions.push('deny-regex');
-                }
+            if (!autoDone.has(key) && (!Array.isArray(list) || !list.includes(avatar))) {
+                c.extensionSettings = c.extensionSettings || {};
+                c.extensionSettings.character_allowed_regex = Array.isArray(list) ? list : [];
+                c.extensionSettings.character_allowed_regex.push(avatar);
+                try { c.saveSettingsDebounced?.(); } catch { /* 忽略 */ }
+                autoDone.add(key);
+                out.actions.push('allow-regex');
             }
         }
 

@@ -44,6 +44,25 @@ function ctx() {
 
 const first = () => ctx();
 
+/**
+ * 解析当前角色索引。
+ * TT 的 getContext() 里 this_chid 常为 null，而引擎要用 characters[this_chid] 读卡内正则，
+ * 为 null 时会导致「看不到卡自带的正则」。这里用酒馆助手的公开 API 反查索引兜底。
+ */
+function resolveChid(c) {
+    const raw = c?.this_chid;
+    if (raw !== null && raw !== undefined) return raw;
+    try {
+        const helper = (typeof window !== 'undefined') ? (window.TavernHelper ?? null) : null;
+        const name = helper?.getCurrentCharacterName?.();
+        if (name && Array.isArray(c?.characters)) {
+            const index = c.characters.findIndex((x) => x?.name === name);
+            if (index >= 0) return index;
+        }
+    } catch { /* 忽略 */ }
+    return raw;
+}
+
 /* ---------------- 会变化的绑定（export let + 刷新） ---------------- */
 
 export const event_types = first().eventTypes ?? FALLBACK_EVENT_TYPES;
@@ -51,7 +70,7 @@ export let eventSource = first().eventSource ?? null;
 
 export let chat = first().chat ?? [];
 export let characters = first().characters ?? [];
-export let this_chid = first().this_chid;
+export let this_chid = resolveChid(first());
 export let chat_metadata = first().chatMetadata ?? first().chat_metadata ?? {};
 export let name1 = first().name1 ?? '';
 export let power_user = first().powerUser ?? {};
@@ -71,7 +90,8 @@ export function refreshBindings() {
     lastRefresh = Date.now();
     const c = first();
     if (Array.isArray(c.characters) && c.characters !== characters) characters = c.characters;
-    if (c.this_chid !== undefined && c.this_chid !== this_chid) this_chid = c.this_chid;
+    const nextChid = resolveChid(c);
+    if (nextChid !== this_chid) this_chid = nextChid;
     if (c.chat && c.chat !== chat) chat = c.chat;
     const meta = c.chatMetadata ?? c.chat_metadata;
     if (meta && meta !== chat_metadata) chat_metadata = meta;
