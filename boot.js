@@ -53,9 +53,14 @@ export async function start(ctx = {}) {
     }
 
     // ③ 管道 / 流式 / 面板
-    await pipeline.init();
-    initLegacyStreamHook();
-    initStreamService();
+    //    每一步独立 try/catch：宿主少一个 API 时，不应该让整个扩展（含本地后端与面板）起不来
+    try {
+        await pipeline.init();
+    } catch (error) {
+        console.error('[rphub] 事件管道初始化失败（正则引擎可能不可用）：', error);
+    }
+    try { initLegacyStreamHook(); } catch (error) { console.warn('[rphub] 流式钩子初始化失败：', error); }
+    try { initStreamService(); } catch (error) { console.warn('[rphub] 流式渲染服务初始化失败：', error); }
 
     try {
         await panel.init();
@@ -63,7 +68,7 @@ export async function start(ctx = {}) {
         console.error('[rphub] 正则面板初始化失败（不阻塞引擎管道）：', String(error?.message || error));
     }
 
-    mountCompatApi();
+    try { mountCompatApi(); } catch (error) { console.warn('[rphub] 兼容入口挂载失败：', error); }
 
     // ④ 把 RP助手 面板脚本注册进酒馆助手（已装则跳过；未装则静默）
     try {
