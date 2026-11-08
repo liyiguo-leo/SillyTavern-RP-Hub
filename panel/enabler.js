@@ -90,9 +90,9 @@ function readAutoConfig() {
         const raw = JSON.parse(localStorage.getItem(AUTO_KEY) || '{}');
         // 默认：放行卡内正则（原卡自带美化）+ 世界书只复用/绑定（**不新建**，避免与
         // 酒馆原生导入、RP助手 的建书路径撞成两本）
-        return { regex: true, worldbook: true, worldbookCreate: false, ...(raw && typeof raw === 'object' ? raw : {}) };
+        return { regex: true, worldbook: true, worldbookCreate: false, consolidate: true, ...(raw && typeof raw === 'object' ? raw : {}) };
     } catch {
-        return { regex: true, worldbook: true, worldbookCreate: false };
+        return { regex: true, worldbook: true, worldbookCreate: false, consolidate: true };
     }
 }
 
@@ -162,6 +162,97 @@ async function findBookBySignature(names, key, limit = 40) {
         if (await bookMatches(bookName, key)) return bookName;
     }
     return null;
+}
+
+/**
+ * 世界书合并：把“同一份卡内容的重复书”和“RP助手 的 [RP] 专用书”合并到一本，删掉多余的。
+ *
+ * 判定非常保守：
+ *   - 只有内容指纹与卡内世界书完全一致的书，才算“同一本”；
+ *   - 只删除“所有条目都已存在于目标书里”的书（按 name+content 精确比对）；
+ *   - 绝不新建；找不到卡内容书就什么都不做。
+ */
+async function consolidateWorldbooks(name, entries, bound) {
+    const out = { actions: [] };
+    try {
+        if (typeof getWorldbookNames !== 'function' || typeof getWorldbook !== 'function'
+            || typeof createWorldbookEntries !== 'function' || typeof deleteWorldbook !== 'function') {
+            return out;
+        }
+
+        const names = (() => { try { return getWorldbookNames(); } catch { return []; } })();
+        if (!Array.isArray(names) || names.length === 0) return out;
+
+        const wantedKey = signatureKey(entries);
+        const sigs = new Map();
+        for (const book of names.slice(0, 40)) {
+            try { sigs.set(book, signatureKey(await getWorldbook(book))); } catch { /* 跳过读失败的书 */ }
+        }
+
+        const cardBooks = names.filter((book) => sigs.get(book) === wantedKey);
+        if (cardBooks.length === 0) return out;   // 没有卡内容书：不建、不合并
+
+        // RP助手 的书：条目名里带 [RP]（如 [RP]变量更新），且不是卡内容书
+        const rpBooks = names.filter((book) => {
+            if (cardBooks.includes(book)) return false;
+            const key = sigs.get(book) || '';
+            return key.includes('[RP]') || key.includes('变量更新');
+        });
+
+        const target = (bound?.primary && cardBooks.includes(bound.primary)) ? bound.primary : cardBooks[0];
+        out.target = target;
+
+        const targetEntries = await getWorldbook(target).catch(() => []);
+        const seen = new Set((targetEntries || []).map((e) => `${e?.name ?? ''}\u0000${e?.content ?? ''}`));
+
+        // 先重新绑定，再删旧书：避免出现「primary 指向已删除书」的瞬间（RP助手 会因此再建一本）
+        if (bound?.primary !== target) {
+            try {
+                await rebindCharWorldbooks('current', {
+                    primary: target,
+                    additional: Array.isArray(bound?.additional) ? bound.additional : [],
+                });
+                out.actions.push('rebind');
+            } catch (e) {
+                out.error = e?.message || String(e);
+            }
+        }
+
+        const extras = [
+            ...cardBooks.filter((book) => book !== target),
+            ...rpBooks.filter((book) => book !== target),
+        ];
+
+        for (const book of extras) {
+            let list = [];
+            try { list = await getWorldbook(book); } catch { continue; }
+            if (!Array.isArray(list) || list.length === 0) continue;
+
+            const toAdd = list.filter((e) => !seen.has(`${e?.name ?? ''}\u0000${e?.content ?? ''}`));
+            try {
+                if (toAdd.length > 0) await createWorldbookEntries(target, toAdd);
+            } catch (e) {
+                out.error = e?.message || String(e);
+                continue;   // 合并失败就保留这本，不删
+            }
+            for (const e of toAdd) seen.add(`${e?.name ?? ''}\u0000${e?.content ?? ''}`);
+
+            // 只有当这本书的每一条都已存在于目标书里，才删除它
+            const allCovered = list.every((e) => seen.has(`${e?.name ?? ''}\u0000${e?.content ?? ''}`));
+            if (allCovered) {
+                try {
+                    await deleteWorldbook(book);
+                    out.actions.push(`merge:${book}`);
+                } catch (e) {
+                    out.error = e?.message || String(e);
+                }
+            }
+        }
+
+    } catch (e) {
+        out.error = e?.message || String(e);
+    }
+    return out;
 }
 
 /* ---------------- 自动准备 ---------------- */
@@ -256,6 +347,7 @@ async function doAutoPrepare(reason = 'event') {
                                 additional: Array.isArray(bound?.additional) ? bound.additional : [],
                             });
                             out.actions.push('bind-worldbook');
+                            if (bound) bound.primary = target;   // 本地同步，避免随后 consolidate 再绑一次
                         } catch (e) {
                             out.bindError = e?.message || String(e);
                         }
@@ -263,6 +355,14 @@ async function doAutoPrepare(reason = 'event') {
                     autoDone.add(doneKey);
                 }
                 autoDone.add(`wb-scan:${name}`);       // 本会话该卡的世界书已处理完
+
+                // 合并重复世界书（默认开；只合并“同内容”与“[RP] 专用”两类，删除前逐条校验覆盖）
+                if (config.consolidate !== false && !autoDone.has(`merge:${name}`)) {
+                    const merged = await consolidateWorldbooks(name, entries, bound);
+                    autoDone.add(`merge:${name}`);
+                    if (merged.actions.length > 0) out.actions.push(...merged.actions);
+                    if (merged.error) out.mergeError = merged.error;
+                }
             }
         }
     } catch (e) {

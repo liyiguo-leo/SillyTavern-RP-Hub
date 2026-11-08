@@ -6,5 +6,5 @@ export const PLUGIN_ID = 'rp-hub-compat';
 export const API_BASE_PATH = '/api/plugins/rp-hub-compat/v1';
 export const LOCAL_BACKEND_VERSION = '0.1.0-local';
 /** 扩展版本（与 manifest.json 的 version 保持一致；诊断面板/报告里显示） */
-export const EXTENSION_VERSION = '0.7.3-unified.4';
+export const EXTENSION_VERSION = '0.7.4-unified.5';
 

@@ -175,6 +175,16 @@ RP 卡的 `regex_scripts` 只有 `name` 字段，酒馆正则面板读写 `scrip
 localStorage.setItem('rphub:regex-backfill', '1')   // 开启后重开聊天触发一次
 ```
 
+### 世界书合并（只留一本）
+
+酒馆原生导入与 RP助手 各有一条建书路径，可能出现两本。扩展会在切卡/导入后自动合并：
+
+- 只把「与卡内世界书内容指纹一致」的书、以及「条目名带 `[RP]`（如 `[RP]变量更新`）」的书视为同类；
+- 先合并条目到保留的那本（按 name+content 去重），**再**把角色 primary 绑到它，最后删除“每条都已存在于目标书”的旧书；
+- 不新建、不覆盖用户自建书；失败即跳过（保留原书）。
+
+关掉：`localStorage.setItem('rphub:auto', JSON.stringify({ regex: true, worldbook: true, consolidate: false }))`
+
 ## 8. 与酒馆内置「正则」的关系（重要）
 
 本扩展的引擎是酒馆正则的替代实现，**两者不能同时跑**，否则同一份正则会被执行两次（双重替换）：
