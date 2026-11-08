@@ -1,0 +1,15 @@
+{
+    "display_name": "RP-Hub 套件（正则引擎 + 本地后端 + 面板桥）",
+    "loading_order": 1,
+    "requires": [],
+    "optional": [],
+    "generate_interceptor": "rphubCompatPromptInterceptor",
+    "js": "index.js",
+    "css": "style.css",
+    "author": "RP-Hub 兼容插件（合并版）",
+    "version": "0.7.4-unified.5",
+    "homePage": "",
+    "hooks": {
+        "activate": "init"
+    }
+}

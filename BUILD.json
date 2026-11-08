@@ -1,0 +1,6 @@
+{
+  "variant": "tt",
+  "builtAt": "2026-11-08T21:14:42.458Z",
+  "externalImports": 0,
+  "note": "TT 变体：st-bridge 走 getContext()；原版正则面板被替换；无跨出扩展目录的 import"
+}
