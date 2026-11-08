@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // panel/st-import.js —— 本地模式下的「写回」：把卡交给酒馆自己导入
 //
-// 两条通道，按可用性依次尝试（TT 酒馆 / 纯前端宿主未必有 Node 版的 /api/characters/import）：
-//   1. POST /api/characters/import   —— 与酒馆原生拖入同一条链路（SillyTavern 一定有）
-//   2. TavernHelper.importRawCharacter —— 酒馆助手提供的原生导入接口（TT 上更可能可用）
-// 都不可用时抛错，由调用方把 standardCard.error 透给上层（卡已入本地库，不影响后续渲染）。
+// 导入前会先过一遍 local/card-bytes.js：给 RP 卡的正则补 scriptName（可关）。
+// 这一步失败不影响导入（原样交给酒馆）。
+
+import { prepareCardBytes } from '../local/card-bytes.js';
 
 /** 取 ST 上下文：优先当前 realm，其次父窗口（TT / iframe 场景） */
 function getContext() {
@@ -31,14 +31,17 @@ export async function importToSt(bytes, filename) {
     const name = String(filename || '').trim() || 'card.png';
     const ext = (name.split('.').pop() || 'png').toLowerCase();
     const mime = ext === 'json' ? 'application/json' : (ext === 'png' ? 'image/png' : 'application/octet-stream');
-    const blob = new Blob([bytes], { type: mime });
+
+    // 导入前预处理（补正则名）；失败时返回原字节
+    const prepared = await prepareCardBytes(bytes);
+    const blob = new Blob([prepared], { type: mime });
 
     // 通道 1：酒馆原生接口
     const ctx = getContext();
     if (ctx) {
         try {
             const form = new FormData();
-            form.append('avatar', new File([bytes], name, { type: mime }));
+            form.append('avatar', new File([prepared], name, { type: mime }));
             form.append('file_type', ext);
             form.append('user_name', String(ctx.name1 ?? ''));
 
@@ -65,9 +68,8 @@ export async function importToSt(bytes, filename) {
             try { return importRawCharacter; } catch { return window.TavernHelper.importRawCharacter; }
         })();
         await fn(name, blob);
-        // TH 返回真实 Response，但不同版本回包字段不一；用最新角色列表兜底定位 avatar
         const fresh = getContext();
-        const pool = fresh?.characters || fresh?.getCharacters?.() || [];
+        const pool = fresh?.characters || [];
         const hit = Array.isArray(pool)
             ? pool.find((c) => String(c?.name || '').trim() === String(name.replace(/\.[^.]+$/, '')).trim())
             : null;

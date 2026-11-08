@@ -9,6 +9,7 @@
 import { installLocalBackend } from './local/fetch-shim.js';
 import { importToSt } from './panel/st-import.js';
 import { probeEnvironment, checkCoreScript } from './local/compat.js';
+import { backfillRegexNamesOnce } from './panel/backfill-regex-names.js';
 import { EXTENSION_VERSION } from './local/constants.js';
 
 export const EXTENSION_URL = new URL('./', import.meta.url).href;
@@ -31,6 +32,11 @@ export async function init() {
     } catch (error) {
         reportBootFailure(error);
     }
+
+    // 方案 B（默认关闭）：给已导入的卡补正则名。开启才跑，且每卡每会话一次。
+    try {
+        setTimeout(() => { void backfillRegexNamesOnce().catch(() => { }); }, 3000);
+    } catch { /* 忽略 */ }
 }
 
 /** 引擎模块图装载失败时的可执行提示 */

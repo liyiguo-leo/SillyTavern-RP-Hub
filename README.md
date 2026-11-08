@@ -158,7 +158,24 @@ RP助手 原始文案是 `RP 卡已上传：…（判定：本地）`，其中�
 `识别通道：前端判定为 RP 卡`（`tools/patch-panel.mjs`，精确替换，命中数为 0 会构建失败）。
 
 
-## 7. 与酒馆内置「正则」的关系（重要）
+## 7. 卡内正则自动命名（导入时）
+
+RP 卡的 `regex_scripts` 只有 `name` 字段，酒馆正则面板读写 `scriptName`，所以面板里显示“未命名”、也改不动。
+
+本扩展在**导入前**给这些条目补 `scriptName`：按内容分类（`剥离·变量更新` / `结构·界面容器` / `样式·字体` / `样式·颜色` / `样式·布局` / `提示词` / `替换·xxx`），同类自动编号。
+
+- 实现方式：改写 PNG 的 `chara/ccv3` 文本块（重算 CRC），**图像块一个字节都不动**；JSON 卡直接改 JSON
+- 只补空值：你手动改过的名字不会被覆盖
+- 只对 RP 卡生效；普通卡完全跳过
+- 开关：`localStorage['rphub:regex-naming'] = '0'` 关闭（默认开）
+
+对**已经导入过**的老卡，可用方案 B（默认关）：
+
+```js
+localStorage.setItem('rphub:regex-backfill', '1')   // 开启后重开聊天触发一次
+```
+
+## 8. 与酒馆内置「正则」的关系（重要）
 
 本扩展的引擎是酒馆正则的替代实现，**两者不能同时跑**，否则同一份正则会被执行两次（双重替换）：
 
@@ -170,13 +187,13 @@ RP助手 原始文案是 `RP 卡已上传：…（判定：本地）`，其中�
 3. 全局正则（`extension_settings.regex`）无需放行；预设正则需 `preset_allowed_regex`（TT 版暂未提供入口）。
 4. 关掉内置正则后，卡导入时酒馆不再弹「是否允许此卡正则」，所以第 2 步要手动点一次。
 
-## 8. 已知边界
+## 9. 已知边界
 
 - 本地模式不实现 `/cards/{id}/st`（无 PNG 编码器）→ 明确 `501 LOCAL_NOT_IMPLEMENTED`。
 - IndexedDB 卡库与服务器库不互通；跨设备用 `exportLibrary()` / `importLibrary()`（可在控制台调用 `local/store.js` 的导出函数）。
 - TT 变体的已知降级：无 `streamingProcessor` → 流式即时正则不生效；无 `getPresetManager` → 预设分组降级为安全空壳；`renderExtensionTemplateAsync` 返回空串（当前代码未使用）。
 
-## 9. 许可证
+## 10. 许可证
 
 各部件沿用上游：AGPL-3.0-or-later（RegexPlus / Backend），RP助手按其仓库 LICENSE；
 本仓新增的 `local/`、`panel/`、`variants/`、`tools/` 同 AGPL-3.0-or-later。
